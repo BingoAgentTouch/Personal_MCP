@@ -30,6 +30,7 @@ memory/                     # 存储根,相对「服务器进程的工作目录(
 npm install
 npm run build      # tsc → dist/
 ```
+（注意，CherryStudio用户可能由于该GUI的路径问题或管道问题无法直接使用，请谨慎安装）
 
 要求 Node ≥ 20(开发用 22 验证)。
 
