@@ -26,6 +26,8 @@ memory/                     # 存储根,相对「服务器进程的工作目录(
 
 ## 安装 & 构建
 
+下载安装到某个路径
+
 ```bash
 npm install
 npm run build      # tsc → dist/
@@ -48,6 +50,9 @@ npm run build      # tsc → dist/
   }
 }
 ```
+<<<<<<< HEAD
+=======
+或直接给Claude Code文件已安装的路径，让其智能注册，然后重启Claude Code。
 
 ---
 
