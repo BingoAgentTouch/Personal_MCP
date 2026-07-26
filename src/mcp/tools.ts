@@ -50,6 +50,11 @@ export const TOOLS = [
 				},
 				topic_name: { type: "string", description: "所属主题名称，如 '粒子系统'" },
 				agent_id: { type: "string", description: "所属 agent ID（可选）" },
+				importance: {
+					type: "number",
+					description:
+						"先天重要性 0.0~1.0（可选，缺省 0.5）。检索时重要的记忆在相似度接近时上浮。锚点：架构决策≈0.9，功能实现≈0.7，工具配置≈0.5，临时排查≈0.35，闲聊≈0.15",
+				},
 			},
 			required: ["date", "start_turn_id", "end_turn_id", "task_desc", "result_desc", "tags", "topic_name"],
 		},

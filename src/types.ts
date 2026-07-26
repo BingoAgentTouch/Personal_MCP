@@ -37,6 +37,21 @@ export interface FragmentInput {
 	tags: string[];
 	topic_name: string;
 	agent_id?: string;
+	importance?: number; // 先天重要性 0.0~1.0，缺省 0.5
+}
+
+// ============================================================
+// 权重元数据（frag_NNN.meta.json）
+// 结构一次定义到位：SM-2 字段（ease/interval/repetition/last_hit_at）
+// 是第二期占位，第一期只读写 importance。
+// ============================================================
+
+export interface FragmentWeightMeta {
+	importance: number; // 先天重要性 0.0~1.0
+	ease: number; // SM-2 easiness factor，第二期用
+	interval: number; // SM-2 复习间隔（天），第二期用
+	repetition: number; // SM-2 命中次数，第二期用
+	last_hit_at: string | null; // 上次命中时间 ISO，第二期用
 }
 
 // ============================================================
@@ -73,7 +88,9 @@ export interface TopicIndexMeta {
 
 export interface SearchResultItem {
 	fragment_id: string;
-	score: number;
+	score: number; // final_score = raw_similarity × weight（重排依据）
+	raw_similarity: number; // 原始 cosine/jaccard 相似度
+	weight: number; // combined_weight（第一期 = decay_floor），调试用
 	task_desc: string;
 	result_desc: string;
 	tags: string[];
@@ -112,6 +129,7 @@ export interface CreateFragmentInput {
 	tags: string[];
 	topic_name: string;
 	agent_id?: string;
+	importance?: number; // 先天重要性 0.0~1.0，缺省 0.5
 }
 
 export interface CreateDailySummaryInput {

@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { FragmentInput, FragmentMeta } from "../types.js";
+import type { FragmentInput, FragmentMeta, FragmentWeightMeta } from "../types.js";
 import { getTurnRangeText } from "./raw.js";
 
 const BASE = path.resolve("memory/fragments");
@@ -26,6 +26,41 @@ function fragPath(date: string, id: string): string {
 /** embedding 文件路径 */
 export function embeddingPath(date: string, id: string): string {
 	return path.join(ensureDateDir(date), `${id}.embedding`);
+}
+
+/** 权重元数据文件路径 */
+export function metaPath(date: string, id: string): string {
+	return path.join(ensureDateDir(date), `${id}.meta.json`);
+}
+
+/** 默认权重元数据（缺省 importance 0.5；SM-2 字段为第二期占位） */
+export const DEFAULT_META: FragmentWeightMeta = {
+	importance: 0.5,
+	ease: 2.5,
+	interval: 1,
+	repetition: 0,
+	last_hit_at: null,
+};
+
+/** 读取片段权重 meta，缺失/损坏时返回默认（不阻塞检索） */
+export function readMeta(fragmentId: string): FragmentWeightMeta {
+	const [date, id] = fragmentId.split("/");
+	const fp = metaPath(date, id);
+	if (!fs.existsSync(fp)) return { ...DEFAULT_META };
+	try {
+		const parsed = JSON.parse(fs.readFileSync(fp, "utf-8")) as Partial<FragmentWeightMeta>;
+		return { ...DEFAULT_META, ...parsed };
+	} catch {
+		return { ...DEFAULT_META };
+	}
+}
+
+/** 原子写入 meta（临时文件 + rename，避免并发产生半截 JSON） */
+export function writeMeta(date: string, id: string, meta: FragmentWeightMeta): void {
+	const dir = ensureDateDir(date);
+	const tmp = path.join(dir, `${id}.meta.json.tmp`);
+	fs.writeFileSync(tmp, JSON.stringify(meta), "utf-8");
+	fs.renameSync(tmp, metaPath(date, id));
 }
 
 /** 生成片段 MD 内容 */
@@ -112,6 +147,12 @@ export function createFragment(input: FragmentInput): { fragment_id: string; met
 	const id = `frag_${String(num).padStart(3, "0")}`;
 	const md = buildFragmentMD(input, turnsText);
 	fs.writeFileSync(fragPath(input.date, id), md, "utf-8");
+
+	// 落初始权重 meta（第一期只由 importance 决定，其余为占位默认）
+	writeMeta(input.date, id, {
+		...DEFAULT_META,
+		importance: input.importance ?? DEFAULT_META.importance,
+	});
 
 	const meta: FragmentMeta = {
 		fragment_id: `${input.date}/${id}`,

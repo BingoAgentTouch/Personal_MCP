@@ -14,7 +14,7 @@ import type {
 	GetTopicInput,
 } from "../types.js";
 import { appendTurn, readTurns, listDates as listRawDates } from "../storage/raw.js";
-import { createFragment, getFragment, getFragmentRaw, listAllFragmentIds } from "../storage/fragments.js";
+import { createFragment, getFragment, getFragmentRaw, listAllFragmentIds, metaPath, writeMeta, DEFAULT_META } from "../storage/fragments.js";
 import { createDailySummary, getDailySummary } from "../storage/daily.js";
 import { upsertTopic, getTopic, getTopicRaw, listTopics } from "../storage/topics.js";
 import { search } from "../search/retriever.js";
@@ -30,7 +30,8 @@ export async function handleStoreTurn(input: StoreTurnInput) {
 }
 
 export async function handleCreateFragment(input: CreateFragmentInput) {
-	const { fragment_id, meta } = createFragment({ ...input, agent_id: input.agent_id });
+	const importance = input.importance ?? DEFAULT_META.importance;
+	const { fragment_id, meta } = createFragment({ ...input, agent_id: input.agent_id, importance });
 
 	// 生成 embedding —— 编码任务描述+结论+原文，查询多针对结论，纳入后召回更准
 	const embedText = `${meta.task_desc}\n${meta.result_desc}\n${meta.turns_text}`;
@@ -107,6 +108,15 @@ export async function handleGetFragment(input: GetFragmentInput) {
 			content: [{ type: "text" as const, text: `片段不存在：${input.fragment_id}` }],
 			isError: true,
 		};
+	}
+	// 遇到缺失权重 meta 的老片段，顺手补写默认（不阻塞本次返回）
+	const [date, id] = input.fragment_id.split("/");
+	if (date && id && !fs.existsSync(metaPath(date, id))) {
+		try {
+			writeMeta(date, id, { ...DEFAULT_META });
+		} catch {
+			// 补写失败不影响本次读取
+		}
 	}
 	return {
 		content: [{ type: "text" as const, text: md }],

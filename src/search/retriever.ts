@@ -1,16 +1,26 @@
 import * as fs from "node:fs";
 import type { SearchResultItem, SearchResults } from "../types.js";
-import { listAllFragmentIds, getFragment, embeddingPath } from "../storage/fragments.js";
+import { listAllFragmentIds, getFragment, embeddingPath, readMeta } from "../storage/fragments.js";
 import { getDailySummaryMeta } from "../storage/daily.js";
 import { getTopic } from "../storage/topics.js";
 import { encode, cosine, jaccardSimilarity, isFallbackMode } from "../embedding/provider.js";
+
+/**
+ * 由先天重要性映射出保底权重（第一期 combined_weight = decay_floor）。
+ *   decay_floor = importance × 0.7 + (1 - importance) × 0.3 = 0.4 × importance + 0.3
+ * 值域 [0.3, 0.7]，恒 ≤ 1.0：纯衰减、只重排、绝不放大到原始相似度之上。
+ */
+export function decayFloor(importance: number): number {
+	const imp = Math.max(0, Math.min(1, importance));
+	return 0.4 * imp + 0.3;
+}
 
 /** 加载所有片段的 embedding 向量 */
 async function loadAllEmbeddings(): Promise<Map<string, number[]>> {
 	const map = new Map<string, number[]>();
 	const ids = listAllFragmentIds();
 	for (const fragId of ids) {
-		const ep = embeddingPath(...fragId.split("/") as [string, string]);
+		const ep = embeddingPath(...(fragId.split("/") as [string, string]));
 		if (fs.existsSync(ep)) {
 			try {
 				const raw = fs.readFileSync(ep, "utf-8");
@@ -24,7 +34,36 @@ async function loadAllEmbeddings(): Promise<Map<string, number[]>> {
 	return map;
 }
 
-/** 回退模式搜索：Jaccard 相似度 */
+/**
+ * 对候选池（已按 raw similarity 排好序）套第一期权重重排，取 top_k。
+ *   final_score = similarity × decayFloor(importance)
+ * 读 meta 只发生在候选池（top_k×3），是相对全量检索的边际成本。
+ */
+function weightAndRerank(
+	scored: Array<{ id: string; score: number }>,
+	topK: number,
+): SearchResultItem[] {
+	// 先按 raw similarity 取候选池 top_k×3
+	scored.sort((a, b) => b.score - a.score);
+	const pool = scored.slice(0, topK * 3);
+
+	const weighted = pool.map((s) => {
+		const meta = readMeta(s.id);
+		const weight = decayFloor(meta.importance);
+		return { id: s.id, rawSimilarity: s.score, weight, final: s.score * weight };
+	});
+
+	weighted.sort((a, b) => b.final - a.final);
+
+	const results: SearchResultItem[] = [];
+	for (const w of weighted.slice(0, topK)) {
+		const item = buildResultItem(w.id, w.rawSimilarity, w.weight);
+		if (item) results.push(item);
+	}
+	return results;
+}
+
+/** 回退模式搜索：Jaccard 相似度 + 第一期权重重排 */
 function fallbackSearch(query: string, topK: number, agentId?: string): SearchResultItem[] {
 	const ids = listAllFragmentIds();
 	const scored: Array<{ id: string; score: number }> = [];
@@ -40,12 +79,11 @@ function fallbackSearch(query: string, topK: number, agentId?: string): SearchRe
 		}
 	}
 
-	scored.sort((a, b) => b.score - a.score);
-	return scored.slice(0, topK).map((s) => buildResultItem(s.id, s.score)).filter((x): x is SearchResultItem => x !== null);
+	return weightAndRerank(scored, topK);
 }
 
-/** 构建单个结果条目（含层级回溯） */
-function buildResultItem(fragId: string, score: number): SearchResultItem | null {
+/** 构建单个结果条目（含层级回溯 + 三分数透出） */
+function buildResultItem(fragId: string, rawSimilarity: number, weight: number): SearchResultItem | null {
 	const frag = getFragment(fragId);
 	if (!frag) return null;
 
@@ -57,9 +95,13 @@ function buildResultItem(fragId: string, score: number): SearchResultItem | null
 		topicSummary = topic.entries.map((e) => `${e.date}：${e.summary}`).join("；");
 	}
 
+	const round4 = (n: number) => Math.round(n * 10000) / 10000;
+
 	return {
 		fragment_id: frag.fragment_id,
-		score: Math.round(score * 10000) / 10000,
+		score: round4(rawSimilarity * weight),
+		raw_similarity: round4(rawSimilarity),
+		weight: round4(weight),
 		task_desc: frag.task_desc,
 		result_desc: frag.result_desc,
 		tags: frag.tags,
@@ -74,9 +116,8 @@ function buildResultItem(fragId: string, score: number): SearchResultItem | null
 	};
 }
 
-/** 语义检索：embedding 搜索 + 层级回溯 */
+/** 语义检索：embedding 搜索 + 权重重排 + 层级回溯 */
 export async function search(query: string, topK: number = 10, agentId?: string): Promise<SearchResults> {
-	// const file-scoped variable for agent filtering
 	const filterAgentId = agentId;
 
 	// 回退模式
@@ -108,14 +149,5 @@ export async function search(query: string, topK: number = 10, agentId?: string)
 		}
 	}
 
-	scored.sort((a, b) => b.score - a.score);
-	const top = scored.slice(0, topK);
-
-	const results: SearchResultItem[] = [];
-	for (const s of top) {
-		const item = buildResultItem(s.id, s.score);
-		if (item) results.push(item);
-	}
-
-	return { query, results };
+	return { query, results: weightAndRerank(scored, topK) };
 }
