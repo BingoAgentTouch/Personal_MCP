@@ -18,6 +18,7 @@ import { createFragment, getFragment, getFragmentRaw, listAllFragmentIds, metaPa
 import { createDailySummary, getDailySummary } from "../storage/daily.js";
 import { upsertTopic, getTopic, getTopicRaw, listTopics } from "../storage/topics.js";
 import { search } from "../search/retriever.js";
+import { logSearch } from "../storage/signals.js";
 import { encode, isFallbackMode } from "../embedding/provider.js";
 import { embeddingPath } from "../storage/fragments.js";
 import * as fs from "node:fs";
@@ -91,6 +92,8 @@ export async function handleUpsertTopic(input: UpsertTopicInput) {
 
 export async function handleSearch(input: SearchInput) {
 	const results = await search(input.query, input.top_k ?? 10, input.agent_id);
+	// P3 埋点：纯观察，记录本次检索 surface 出的片段名次/相似度/权重，不影响排名
+	logSearch(results.query, results.results, input.agent_id);
 	return {
 		content: [
 			{
