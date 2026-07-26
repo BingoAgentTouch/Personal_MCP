@@ -2,7 +2,7 @@
 
 一个给 LLM Agent(如 Claude Code)用的**分层长期记忆 MCP 服务器**。把对话沉淀成可语义检索的三层记忆,回答"我们上次聊到哪了"时能带出完整上下文。
 
-- **本地优先**:embedding 用本地 `@xenova/transformers`(MiniLM,384 维),不依赖任何云 API。
+- **本地优先**:embedding 用本地 `@xenova/transformers`(多语言 MiniLM,384 维),不依赖任何云 API。
 - **分层回溯**:命中片段(L1)时自动回填当天总结(L2)和主题脉络(L3)。
 - **优雅降级**:模型加载失败时退回关键词(Jaccard)检索,并在 stderr **明确告警**——不会假装正常。
 
@@ -50,25 +50,28 @@ npm run build      # tsc → dist/
   }
 }
 ```
-<<<<<<< HEAD
-=======
+
 或直接给Claude Code文件已安装的路径，让其智能注册，然后重启Claude Code。
 
 ---
 
 ## ⚠ Embedding 模型:首次运行需要它,离线环境要手动放
 
-语义检索依赖 `Xenova/all-MiniLM-L6-v2`(quantized,约 23MB)。**联网**时 transformers.js 首次运行会自动下载到:
+语义检索默认用 `Xenova/paraphrase-multilingual-MiniLM-L12-v2`(quantized,约 118MB,多语言，中文检索排序正确)。**联网**时 transformers.js 首次运行会自动下载到:
 
 ```
-node_modules/@xenova/transformers/.cache/Xenova/all-MiniLM-L6-v2/
+node_modules/@xenova/transformers/.cache/Xenova/paraphrase-multilingual-MiniLM-L12-v2/
 ```
+
+> 想换模型：设环境变量 `MEMORY_EMBED_MODEL=<repo/model>` 即可覆盖默认（见 `src/embedding/provider.ts` 的 `MODEL_ID`）。若换成非 384 维的模型，务必回填历史片段（见下文），新旧维度/模型的向量不可混用。
+>
+> 早期版本用的是 `Xenova/all-MiniLM-L6-v2`(英文模型,约 23MB)——它对中文语义排序会**倒挂**(无关闲聊的 cosine 会压过正确答案),已弃用。
 
 **如果网络访问 huggingface.co 受阻**(常见于国内/隔离网络),自动下载会以 `TypeError: fetch failed` 失败,服务器会退回关键词检索(召回质量明显下降)。此时**手动放置模型**即可,用镜像下载:
 
 ```bash
-BASE="https://hf-mirror.com/Xenova/all-MiniLM-L6-v2/resolve/main"
-DEST="node_modules/@xenova/transformers/.cache/Xenova/all-MiniLM-L6-v2"
+BASE="https://hf-mirror.com/Xenova/paraphrase-multilingual-MiniLM-L12-v2/resolve/main"
+DEST="node_modules/@xenova/transformers/.cache/Xenova/paraphrase-multilingual-MiniLM-L12-v2"
 mkdir -p "$DEST/onnx"
 curl -sL "$BASE/config.json"           -o "$DEST/config.json"
 curl -sL "$BASE/tokenizer.json"        -o "$DEST/tokenizer.json"
@@ -82,8 +85,8 @@ curl -sL "$BASE/onnx/model_quantized.onnx" -o "$DEST/onnx/model_quantized.onnx"
 node --input-type=module -e '
 import { pipeline, env } from "@xenova/transformers";
 env.allowRemoteModels = false;   // 强制只用本地缓存
-const ex = await pipeline("feature-extraction","Xenova/all-MiniLM-L6-v2",{quantized:true});
-const r = await ex("hello",{pooling:"mean",normalize:true});
+const ex = await pipeline("feature-extraction","Xenova/paraphrase-multilingual-MiniLM-L12-v2",{quantized:true});
+const r = await ex("你好",{pooling:"mean",normalize:true});
 console.log("OK dim=", r.data.length);   // 期望 384
 '
 ```

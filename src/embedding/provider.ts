@@ -2,11 +2,18 @@
 // Embedding 引擎
 //
 // 优先级：
-//   1. @xenova/transformers (本地 MiniLM，384 维)
+//   1. @xenova/transformers (本地多语言 MiniLM，384 维)
 //   2. 关键词回退（Jaccard 相似度，无依赖）
 //
 // 惰性初始化：首次调用 encode() 时才加载模型
+//
+// 模型：默认 paraphrase-multilingual-MiniLM-L12-v2（多语言，中文检索
+// 排序正确；原 all-MiniLM-L6-v2 是英文模型，中文语义排序会倒挂）。
+// 同为 384 维，drop-in 替换。可用环境变量 MEMORY_EMBED_MODEL 覆盖。
 // ============================================================
+
+/** embedding 模型 ID，可用环境变量 MEMORY_EMBED_MODEL 覆盖 */
+export const MODEL_ID = process.env.MEMORY_EMBED_MODEL || "Xenova/paraphrase-multilingual-MiniLM-L12-v2";
 
 type EncodeFn = (text: string) => Promise<number[]>;
 
@@ -18,9 +25,9 @@ let modelLoadError = false;
 async function tryLoadTransformers(): Promise<EncodeFn | null> {
 	try {
 		const { pipeline, env } = await import("@xenova/transformers");
-		// 允许离线复用本地缓存的模型（.cache/Xenova/all-MiniLM-L6-v2）
+		// 允许离线复用本地缓存的模型（.cache/Xenova/<MODEL_ID>）
 		env.allowLocalModels = true;
-		const extractor = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+		const extractor = await pipeline("feature-extraction", MODEL_ID, {
 			quantized: true,
 		});
 		return async (text: string): Promise<number[]> => {
@@ -31,7 +38,7 @@ async function tryLoadTransformers(): Promise<EncodeFn | null> {
 		// 不再静默吞掉：把真实原因打到 stderr，否则会伪装成「正常」跑降级模式
 		const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 		console.error(`[embedding] MiniLM 模型加载失败，退回关键词 Jaccard 模式。真实原因: ${msg}`);
-		console.error(`[embedding] 若为 "fetch failed"：模型未缓存且无法联网。手动放置到 node_modules/@xenova/transformers/.cache/Xenova/all-MiniLM-L6-v2/`);
+		console.error(`[embedding] 若为 "fetch failed"：模型未缓存且无法联网。手动放置到 node_modules/@xenova/transformers/.cache/${MODEL_ID}/`);
 		return null;
 	}
 }
