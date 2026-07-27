@@ -99,7 +99,9 @@ export const TOOLS = [
 	{
 		name: "memory_search",
 		description:
-			"语义检索长期记忆。对用户问题做 embedding 搜索，命中层级 1 的片段后回溯层级 2（每日总结）和层级 3（主题索引），返回带完整上下文的结果。",
+			"语义检索长期记忆。对用户问题做 embedding 搜索，命中层级 1 的片段后回溯层级 2（每日总结）和层级 3（主题索引），返回带完整上下文的结果。\n\n" +
+			"检索工作流（ReAct + 人工闸门）：先看返回的一批摘要，用人话把你的语义判断念出来（哪条像、哪条不像、为什么），别把相似度分数摊给用户。如果这批都不对，换个检索词再搜一次——每次 reformulate 都是有意义的成本信号，不要憋着一次问完。当你锁定某一条、但拿不准时，先问用户「要不要我读一遍这条的原文？」，得到肯定答复后再用 confirmed_by=user 调 memory_get_fragment。\n" +
+			"护栏：rank-1 明显碾压、一击命中时，直接用，别表演整套循环也别烦用户。把「念推理 + 问用户」只留给真绕、真拿不准的回忆。",
 		inputSchema: {
 			type: "object" as const,
 			properties: {
@@ -118,13 +120,29 @@ export const TOOLS = [
 	},
 	{
 		name: "memory_get_fragment",
-		description: "根据片段 ID 读取完整片段内容（含原文）。",
+		description:
+			"根据片段 ID 读取完整片段内容（含原文）。通常在 memory_search 已给出足够摘要后仍需看逐字原文时才调用。\n" +
+			"读取前若经过「拿不准 → 问用户 → 用户点头」的确认，请传 confirmed_by='user'（这是人工判定「对题、采用」的金标准成功信号）；若是 AI 自行判定要读、没经人工确认，传 confirmed_by='agent'。并把促成本次读取的检索词填进 query，便于把检索→读取重建成一次回忆 episode。",
 		inputSchema: {
 			type: "object" as const,
 			properties: {
 				fragment_id: {
 					type: "string",
 					description: "片段 ID，如 '2025-06-15/frag_003'",
+				},
+				confirmed_by: {
+					type: "string",
+					enum: ["user", "agent"],
+					description:
+						"谁促成本次读原文（可选）：'user'=经用户点头确认采用（金标准成功信号）；'agent'=AI 自行判定要读，未经人工确认",
+				},
+				query: {
+					type: "string",
+					description: "促成本次读取的检索词（可选），助离线把 search→get_fragment 配对成回忆 episode",
+				},
+				agent_id: {
+					type: "string",
+					description: "所属 agent ID（可选），埋点配对键之一",
 				},
 			},
 			required: ["fragment_id"],

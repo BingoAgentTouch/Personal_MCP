@@ -152,6 +152,10 @@ export interface SearchInput {
 
 export interface GetFragmentInput {
 	fragment_id: string; // "2025-06-15/frag_003"
+	// —— P3 观察埋点（Phase 0，只记录不影响读取）——
+	confirmed_by?: "user" | "agent"; // 谁促成本次读原文：user=人工点头（金标准成功），agent=AI 自行判定
+	query?: string; // 促成本次读取的检索词，助离线把 search→get_fragment 配对成 episode
+	agent_id?: string; // 所属 agent，配对键之一（ts + agent_id + fragment_id + query）
 }
 
 export interface GetDailyInput {

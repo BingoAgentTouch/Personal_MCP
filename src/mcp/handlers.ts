@@ -18,7 +18,7 @@ import { createFragment, getFragment, getFragmentRaw, listAllFragmentIds, metaPa
 import { createDailySummary, getDailySummary } from "../storage/daily.js";
 import { upsertTopic, getTopic, getTopicRaw, listTopics } from "../storage/topics.js";
 import { search } from "../search/retriever.js";
-import { logSearch } from "../storage/signals.js";
+import { logSearch, logGetFragment } from "../storage/signals.js";
 import { encode, isFallbackMode } from "../embedding/provider.js";
 import { embeddingPath } from "../storage/fragments.js";
 import * as fs from "node:fs";
@@ -121,6 +121,8 @@ export async function handleGetFragment(input: GetFragmentInput) {
 			// 补写失败不影响本次读取
 		}
 	}
+	// P3 埋点：纯观察，记录本次读原文的成功信号（confirmed_by）与促成检索词，不影响返回
+	logGetFragment(input.fragment_id, input.confirmed_by, input.query, input.agent_id);
 	return {
 		content: [{ type: "text" as const, text: md }],
 	};
