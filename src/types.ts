@@ -165,3 +165,84 @@ export interface GetDailyInput {
 export interface GetTopicInput {
 	topic_name: string;
 }
+
+// ============================================================
+// memory_consolidate_topics
+// ============================================================
+
+export interface ConsolidateTopicsInput {
+	action: "detect" | "execute";
+	threshold?: number; // Jaccard 阈值 [0, 1]，默认按中文 Topic 正负样本校准为 0.3
+	merges?: MergePlan[];
+	dry_run?: boolean; // execute 时仅校验并预览，不写入或删除文件
+}
+
+export interface MergePlan {
+	target: string;       // 合并目标主题名
+	sources: string[];    // 要合并到 target 的主题名列表
+	skip?: boolean;       // 跳过此组
+}
+
+export interface TopicConsolidateResult {
+	pairs?: SimilarTopicPair[];
+	total_pairs?: number;
+	threshold?: number;
+	total_topics?: number;
+	merged?: MergeResultItem[];
+	skipped?: MergeResultItem[];
+	errors?: MergeErrorItem[];
+	dry_run?: boolean;
+	validated?: boolean;
+	changes?: TopicConsolidateChanges;
+	committed?: boolean;
+	transaction_path?: string;
+	recovery_failed?: boolean;
+}
+
+export interface TopicConsolidateChanges {
+	topics_to_update: string[];
+	topics_to_remove: string[];
+	fragments_to_update: string[];
+	backups_to_create: number;
+}
+
+export interface SimilarTopicPair {
+	similarity: number;
+	name_score: number;
+	summary_score: number;
+	topic_a: TopicIndexMeta;
+	topic_b: TopicIndexMeta;
+}
+
+export interface MergeResultItem {
+	target: string;
+	sources_merged: string[];
+	new_entries_count: number;
+	fragments_updated: number;
+	status: string;
+}
+
+export interface MergeErrorItem {
+	group_index: number;
+	error: string;
+}
+
+/**
+ * memory_get_raw_turns 的输入。
+ *
+ * 四种严格互斥的查询模式：
+ * 1) 精确单轮：传 date + turn_id
+ * 2) 范围查询：传 date + turn_start + turn_end
+ * 3) 最近 N 轮：传 date + limit，limit 必须为正整数
+ * 4) 全量查询：只传 date
+ *
+ * 所有模式均可附带 agent_id，先过滤指定 agent 再执行查询。
+ */
+export interface GetRawTurnsInput {
+date: string;
+turn_id?: string;
+turn_start?: string;
+turn_end?: string;
+limit?: number;
+agent_id?: string;
+}

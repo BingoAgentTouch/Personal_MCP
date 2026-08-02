@@ -127,6 +127,16 @@ node <绝对路径>/backfill_embeddings.mjs
 | `memory_search` | 语义检索 → 命中 L1 并回填 L2/L3 上下文 |
 | `memory_get_fragment` / `memory_get_daily` / `memory_get_topic` | 按 ID 读取完整内容 |
 | `memory_list_dates` | 列出所有有记录的日期 |
+| `memory_get_raw_turns` | 按 exact/range/recent/all 四种互斥模式读取 L0 逐轮原文，可先按 `agent_id` 过滤 |
+| `memory_consolidate_topics` | 检测中文相似 Topic；经审阅后支持 dry-run、整批预检、事务式合并与 fragment 回指修复 |
+
+### Topic 合并安全语义
+
+`memory_consolidate_topics(action="execute")` 会先在内存中建立完整批次计划。任一 active 合并组存在 source/target 冲突、非法 fragment ID、路径越界、fragment 缺失或旧 Topic 回指不唯一时，整批返回 `validated: false` 和 MCP `isError: true`，不会创建 `.trash` 或 `.transactions`，也不会改写任何 live 文件。
+
+`dry_run: true` 使用与正式执行相同的计划和预检，只返回 `changes`，不写文件。正式提交会在 `memory/topics/.transactions/<operation_id>/` 建立快照和 staged 内容，按 target → fragment → `.trash` source 备份 → source 删除的顺序提交；可捕获异常会恢复执行前内容。若回滚本身失败，返回 `recovery_failed: true` 与 `transaction_path`，并保留事务目录供人工恢复。
+
+当前保证范围是**进程内可捕获异常**；断电、操作系统崩溃和强杀进程后的自动恢复尚未实现。
 
 ---
 

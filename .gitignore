@@ -13,6 +13,7 @@ memory/
 watcher-state.json
 tsc_err.txt
 db_schema.txt
+test_output.txt
 *.log
 
 # ── 环境与密钥 ────────────────────────────────────────

@@ -12,16 +12,32 @@ import type {
 	GetFragmentInput,
 	GetDailyInput,
 	GetTopicInput,
+	GetRawTurnsInput,
+	ConsolidateTopicsInput,
+	MergePlan,
+	MergeResultItem,
+	MergeErrorItem,
+	TopicConsolidateResult,
 } from "../types.js";
 import { appendTurn, readTurns, listDates as listRawDates } from "../storage/raw.js";
 import { createFragment, getFragment, getFragmentRaw, listAllFragmentIds, metaPath, writeMeta, DEFAULT_META } from "../storage/fragments.js";
 import { createDailySummary, getDailySummary } from "../storage/daily.js";
-import { upsertTopic, getTopic, getTopicRaw, listTopics } from "../storage/topics.js";
+import {
+	upsertTopic,
+	getTopic,
+	getTopicRaw,
+	listTopics,
+	topicSimilarity,
+	DEFAULT_TOPIC_THRESHOLD,
+	planTopicConsolidationBatch,
+	applyTopicConsolidationBatchTransactional,
+} from "../storage/topics.js";
 import { search } from "../search/retriever.js";
 import { logSearch, logGetFragment } from "../storage/signals.js";
 import { encode, isFallbackMode } from "../embedding/provider.js";
 import { embeddingPath } from "../storage/fragments.js";
 import * as fs from "node:fs";
+import * as path from "node:path";
 
 export async function handleStoreTurn(input: StoreTurnInput) {
 	const record = appendTurn(input.date, input.role, input.content, input.agent_id);
@@ -182,6 +198,239 @@ export async function handleListDates() {
 	};
 }
 
+type RawTurnsQuery =
+	| { mode: "all" }
+	| { mode: "exact"; turn_id: string }
+	| { mode: "range"; turn_start: string; turn_end: string }
+	| { mode: "recent"; limit: number };
+
+function resolveRawTurnsQuery(input: GetRawTurnsInput): { query: RawTurnsQuery } | { error: string } {
+	const hasTurnId = input.turn_id !== undefined;
+	const hasTurnStart = input.turn_start !== undefined;
+	const hasTurnEnd = input.turn_end !== undefined;
+	const hasLimit = input.limit !== undefined;
+
+	if (hasLimit && (typeof input.limit !== "number" || !Number.isFinite(input.limit) || !Number.isInteger(input.limit) || input.limit < 1)) {
+		return { error: "参数 limit 必须是大于等于 1 的有限正整数" };
+	}
+	if (hasTurnStart !== hasTurnEnd) {
+		return { error: "参数 turn_start 与 turn_end 必须同时提供" };
+	}
+	if (hasTurnId && (hasTurnStart || hasTurnEnd)) {
+		return { error: "参数 turn_id 不能与范围参数同时提供" };
+	}
+	if (hasTurnId && hasLimit) {
+		return { error: "参数 turn_id 不能与 limit 同时提供" };
+	}
+	if ((hasTurnStart || hasTurnEnd) && hasLimit) {
+		return { error: "范围参数不能与 limit 同时提供" };
+	}
+
+	if (hasTurnId) return { query: { mode: "exact", turn_id: input.turn_id! } };
+	if (hasTurnStart && hasTurnEnd) {
+		return { query: { mode: "range", turn_start: input.turn_start!, turn_end: input.turn_end! } };
+	}
+	if (hasLimit) return { query: { mode: "recent", limit: input.limit! } };
+	return { query: { mode: "all" } };
+}
+
+function formatRawTurnTranscript(turns: Array<{
+	turn_id: string;
+	role: "user" | "assistant";
+	content: string;
+	timestamp: string;
+	agent_id?: string;
+}>) {
+	const roleLabels = { user: "用户", assistant: "AI" } as const;
+	return turns
+		.map((turn) => {
+			const agentLine = turn.agent_id !== undefined ? `\nAgent：${turn.agent_id}` : "";
+			return [
+				`## ${turn.turn_id} · ${roleLabels[turn.role]}`,
+				`时间：${turn.timestamp}${agentLine}`,
+				"",
+				turn.content,
+			].join("\n");
+		})
+		.join("\n\n---\n\n");
+}
+
+export async function handleGetRawTurns(input: GetRawTurnsInput) {
+	const { date, agent_id } = input;
+	const resolved = resolveRawTurnsQuery(input);
+	if ("error" in resolved) {
+		return {
+			content: [{ type: "text" as const, text: resolved.error }],
+			isError: true,
+		};
+	}
+
+	const allTurns = readTurns(date);
+	if (!allTurns.length) {
+		return {
+			content: [{ type: "text" as const, text: `该日期没有对话记录：${date}` }],
+			isError: true,
+		};
+	}
+
+	let turns = agent_id === undefined ? allTurns : allTurns.filter((turn) => turn.agent_id === agent_id);
+	if (!turns.length && agent_id !== undefined) {
+		return {
+			content: [{ type: "text" as const, text: `该日期没有 agent 对应的对话记录：${date} / ${agent_id}` }],
+			isError: true,
+		};
+	}
+
+	const query = resolved.query;
+	if (query.mode === "exact") {
+		const found = turns.find((t) => t.turn_id === query.turn_id);
+		if (!found) {
+			return {
+				content: [{ type: "text" as const, text: `轮次不存在：${query.turn_id}` }],
+				isError: true,
+			};
+		}
+		turns = [found];
+	} else if (query.mode === "range") {
+		const startIdx = turns.findIndex((t) => t.turn_id === query.turn_start);
+		const endIdx = turns.findIndex((t) => t.turn_id === query.turn_end);
+		if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) {
+			return {
+				content: [{ type: "text" as const, text: `轮次范围无效：${query.turn_start} ~ ${query.turn_end}` }],
+				isError: true,
+			};
+		}
+		turns = turns.slice(startIdx, endIdx + 1);
+	} else if (query.mode === "recent") {
+		turns = turns.slice(-query.limit);
+	}
+
+	return {
+		content: [
+			{
+				type: "text" as const,
+				text: `# 原始对话轮次（${date}）\n\n${formatRawTurnTranscript(turns)}`,
+			},
+		],
+	};
+}
+
+// ============================================================
+// memory_consolidate_topics
+// ============================================================
+
+const FRAGMENTS_BASE = path.resolve("memory/fragments");
+
+export async function handleConsolidateTopics(input: ConsolidateTopicsInput) {
+	const threshold = input.threshold ?? DEFAULT_TOPIC_THRESHOLD;
+	if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+		return {
+			content: [{ type: "text" as const, text: "参数 threshold 必须是 [0, 1] 范围内的有限数字" }],
+			isError: true,
+		};
+	}
+	const result: TopicConsolidateResult = {};
+
+	// ---- detect ----
+	if (input.action === "detect") {
+		const topicNames = listTopics();
+		result.total_topics = topicNames.length;
+		result.threshold = threshold;
+
+		const pairs: TopicConsolidateResult["pairs"] = [];
+		const topics = topicNames
+			.map((name) => getTopic(name))
+			.filter((meta): meta is NonNullable<typeof meta> => meta !== null);
+
+		for (let i = 0; i < topics.length; i++) {
+			for (let j = i + 1; j < topics.length; j++) {
+				const score = topicSimilarity(topics[i], topics[j]);
+				if (score.similarity >= threshold) {
+					pairs.push({
+						similarity: Math.round(score.similarity * 10000) / 10000,
+						name_score: Math.round(score.name_score * 10000) / 10000,
+						summary_score: Math.round(score.summary_score * 10000) / 10000,
+						topic_a: topics[i],
+						topic_b: topics[j],
+					});
+				}
+			}
+		}
+
+		pairs.sort((a, b) => b.similarity - a.similarity);
+		result.pairs = pairs;
+		result.total_pairs = pairs.length;
+
+		return {
+			content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+		};
+	}
+
+	// ---- execute ----
+	if (input.action === "execute") {
+		const merges: MergePlan[] = input.merges ?? [];
+		const dryRun = input.dry_run ?? false;
+		const plan = planTopicConsolidationBatch(merges, FRAGMENTS_BASE);
+		const plannedByGroup = new Map(plan.groups.map((group) => [group.group_index, group]));
+		const merged: MergeResultItem[] = [];
+		const skipped: MergeResultItem[] = [];
+
+		for (let i = 0; i < merges.length; i++) {
+			const merge = merges[i];
+			if (merge.skip) {
+				skipped.push({
+					target: merge.target,
+					sources_merged: merge.sources,
+					new_entries_count: 0,
+					fragments_updated: 0,
+					status: "skipped",
+				});
+				continue;
+			}
+			const planned = plannedByGroup.get(i);
+			merged.push({
+				target: merge.target,
+				sources_merged: merge.sources,
+				new_entries_count: planned?.new_entries_count ?? 0,
+				fragments_updated: planned?.fragments_updated ?? 0,
+				status: plan.validated ? "ok" : "error",
+			});
+		}
+
+		result.merged = merged;
+		result.skipped = skipped;
+		result.errors = plan.errors;
+		result.dry_run = dryRun;
+		result.validated = plan.validated;
+		result.changes = plan.changes;
+
+		if (plan.validated && !dryRun) {
+			const commit = applyTopicConsolidationBatchTransactional(plan);
+			result.committed = !commit.error;
+			if (commit.transaction_path) result.transaction_path = commit.transaction_path;
+			if (commit.recovery_failed) result.recovery_failed = true;
+			if (commit.error) {
+				result.errors = [{ group_index: -1, error: commit.error }];
+				for (const item of merged) item.status = "error";
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+					isError: true,
+				};
+			}
+		}
+
+		return {
+			content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+			...(plan.validated ? {} : { isError: true }),
+		};
+	}
+
+	return {
+		content: [{ type: "text" as const, text: `未知 action：${(input as any).action}` }],
+		isError: true,
+	};
+}
+
 /** 路由表 */
 export const handlerMap: Record<string, (input: any) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>> = {
 	memory_store_turn: handleStoreTurn,
@@ -193,4 +442,6 @@ export const handlerMap: Record<string, (input: any) => Promise<{ content: Array
 	memory_get_daily: handleGetDaily,
 	memory_get_topic: handleGetTopic,
 	memory_list_dates: handleListDates,
+	memory_get_raw_turns: handleGetRawTurns,
+	memory_consolidate_topics: handleConsolidateTopics,
 };
