@@ -35,6 +35,8 @@ import {
 import { search } from "../search/retriever.js";
 import { logSearch, logGetFragment } from "../storage/signals.js";
 import { encode, isFallbackMode } from "../embedding/provider.js";
+import { buildDocumentInput, sourceContentHash } from "../embedding/builder.js";
+import { getActiveGeneration, writeGenerationVector } from "../embedding/generation.js";
 import { embeddingPath } from "../storage/fragments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -49,15 +51,35 @@ export async function handleStoreTurn(input: StoreTurnInput) {
 export async function handleCreateFragment(input: CreateFragmentInput) {
 	const importance = input.importance ?? DEFAULT_META.importance;
 	const { fragment_id, meta } = createFragment({ ...input, agent_id: input.agent_id, importance });
-
-	// 生成 embedding —— 编码任务描述+结论+原文，查询多针对结论，纳入后召回更准
-	const embedText = `${meta.task_desc}\n${meta.result_desc}\n${meta.turns_text}`;
+	const active = getActiveGeneration();
+	const built = active
+		? await buildDocumentInput({
+			task_desc: meta.task_desc,
+			result_desc: meta.result_desc,
+			tags: meta.tags,
+			topic_name: meta.topic_name,
+			turns_text: meta.turns_text,
+		})
+		: null;
+	// 无 active generation 时保留 legacy 公式，避免把 structured 向量写入裸 legacy 目录。
+	const embedText = built?.text ?? `${meta.task_desc}\n${meta.result_desc}\n${meta.turns_text}`;
 	const embedding = await encode(embedText);
-	const ep = embeddingPath(input.date, fragment_id.split("/")[1]);
 	if (embedding.length === 0) {
-		// 降级模式：不写空向量伪装成功，留空文件缺失让回填/搜索走 Jaccard 并可被察觉
-		console.error(`[embedding] ⚠ 片段 ${fragment_id} 未生成向量（降级模式），跳过 .embedding 落盘。`);
+		console.error(`[embedding] ⚠ 片段 ${fragment_id} 未生成向量（降级模式），未写入向量目录。`);
+	} else if (active && built) {
+		writeGenerationVector(active, fragment_id, embedding, {
+			source_content_hash: sourceContentHash({
+				task_desc: meta.task_desc,
+				result_desc: meta.result_desc,
+				tags: meta.tags,
+				topic_name: meta.topic_name,
+				turns_text: meta.turns_text,
+			}),
+			input_hash: built.input_hash,
+			tokens: built.tokens as unknown as Record<string, unknown>,
+		});
 	} else {
+		const ep = embeddingPath(input.date, fragment_id.split("/")[1]);
 		fs.writeFileSync(ep, JSON.stringify(embedding), "utf-8");
 	}
 

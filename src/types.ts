@@ -55,6 +55,59 @@ export interface FragmentWeightMeta {
 }
 
 // ============================================================
+// Embedding representation generations
+// ============================================================
+
+export type EmbeddingGenerationState = "building" | "ready" | "active" | "failed";
+
+export interface EmbeddingGenerationManifest {
+	manifest_schema_version: number;
+	generation_id: string;
+	state: EmbeddingGenerationState;
+	document_recipe_id: string;
+	document_recipe_version: number;
+	query_recipe_id: string;
+	query_recipe_version: number;
+	embedding_model_id: string;
+	embedding_model_revision: string | null;
+	tokenizer_id: string;
+	tokenizer_revision: string | null;
+	runtime_identity: string;
+	pooling: "mean";
+	normalize: boolean;
+	quantized: boolean;
+	dimension: number;
+	model_max_length: number;
+	special_token_reserve: number;
+	source_schema_version: number;
+	source_inventory_hash: string;
+	representation_identity_hash: string;
+	manifest_content_hash: string;
+	expected_count: number;
+	materialized_count: number;
+	failed_count: number;
+	searchable_coverage: number;
+}
+
+export interface ActiveEmbeddingPointer {
+	pointer_schema_version: number;
+	active_generation_id: string;
+	active_manifest_hash: string;
+	previous_generation_id: string | null;
+}
+
+export interface EmbeddingGenerationRecord {
+	fragment_id: string;
+	generation_id: string;
+	source_content_hash: string;
+	input_hash: string;
+	vector_hash: string;
+	dimension: number;
+	tokens: Record<string, unknown>;
+	state: "materialized" | "failed";
+}
+
+// ============================================================
 // 层级 2：每日总结
 // ============================================================
 

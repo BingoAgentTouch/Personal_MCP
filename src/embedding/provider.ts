@@ -68,6 +68,15 @@ export async function encode(text: string): Promise<number[]> {
 	return fn(text);
 }
 
+/** 严格 dense 编码：迁移、回填和 generation 构建禁止 Jaccard fallback。 */
+export async function encodeStrict(text: string): Promise<number[]> {
+	const vector = await encode(text);
+	if (isFallbackMode() || vector.length === 0 || vector.some((value) => !Number.isFinite(value))) {
+		throw new Error("strict embedding encode failed: dense model unavailable or vector invalid");
+	}
+	return vector;
+}
+
 /** 是否在使用回退模式 */
 export function isFallbackMode(): boolean {
 	return modelLoadError;

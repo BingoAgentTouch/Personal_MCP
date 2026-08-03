@@ -4,6 +4,8 @@ import { listAllFragmentIds, getFragment, embeddingPath, readMeta } from "../sto
 import { getDailySummaryMeta } from "../storage/daily.js";
 import { getTopic } from "../storage/topics.js";
 import { encode, cosine, jaccardSimilarity, isFallbackMode } from "../embedding/provider.js";
+import { buildQueryInput } from "../embedding/builder.js";
+import { getActiveGeneration, generationVectorPath } from "../embedding/generation.js";
 
 /**
  * 由先天重要性映射出保底权重（第一期 combined_weight = decay_floor）。
@@ -15,20 +17,24 @@ export function decayFloor(importance: number): number {
 	return 0.4 * imp + 0.3;
 }
 
-/** 加载所有片段的 embedding 向量 */
+/** 加载 active generation 的 embedding；没有 generation 时兼容 legacy 裸向量。 */
 async function loadAllEmbeddings(): Promise<Map<string, number[]>> {
 	const map = new Map<string, number[]>();
+	const active = getActiveGeneration();
 	const ids = listAllFragmentIds();
 	for (const fragId of ids) {
-		const ep = embeddingPath(...(fragId.split("/") as [string, string]));
-		if (fs.existsSync(ep)) {
-			try {
-				const raw = fs.readFileSync(ep, "utf-8");
-				const vec = JSON.parse(raw) as number[];
-				map.set(fragId, vec);
-			} catch {
-				// 跳过损坏的 embedding
-			}
+		const ep = active
+			? generationVectorPath(active.generation_id, fragId)
+			: embeddingPath(...(fragId.split("/") as [string, string]));
+		if (!fs.existsSync(ep)) continue;
+		try {
+			const raw = fs.readFileSync(ep, "utf-8");
+			const vec = JSON.parse(raw) as number[];
+			if (!Array.isArray(vec) || vec.some((value) => !Number.isFinite(value))) throw new Error("invalid vector");
+			if (active && vec.length !== active.dimension) throw new Error("dimension mismatch");
+			map.set(fragId, vec);
+		} catch (error) {
+			console.error(`[embedding] 无法加载 ${fragId} 的 active vector：${String(error)}`);
 		}
 	}
 	return map;
@@ -128,8 +134,10 @@ export async function search(query: string, topK: number = 10, agentId?: string)
 		};
 	}
 
-	// 正常模式：embedding 搜索
-	const queryVec = await encode(query);
+	// 正常模式：query 与 document 共用 active manifest 声明的构造规则
+	const active = getActiveGeneration();
+	const builtQuery = await buildQueryInput(query, active ?? undefined);
+	const queryVec = await encode(builtQuery.text);
 	if (queryVec.length === 0) {
 		return { query, results: fallbackSearch(query, topK, filterAgentId) };
 	}
