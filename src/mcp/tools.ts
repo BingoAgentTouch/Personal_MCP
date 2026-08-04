@@ -21,7 +21,7 @@ export const TOOLS = [
 	{
 		name: "memory_create_fragment",
 		description:
-			"创建一个任务-结果片段（层级 1）。将几轮讨论同一任务的对话打包为片段，自动计算 embedding。需要先调用 memory_store_turn 存储轮次。",
+			"创建一个任务-结果片段（层级 1）。将几轮讨论同一任务的对话打包为片段并自动计算 embedding；需要先调用 memory_store_turn 存储轮次。当前简化模型：必须已有 active embedding generation；工具会把新片段写入当前 delta，并立即参与检索。若 compaction 进行中、delta 已 sealed、或没有 active generation，则拒绝创建且不写入 fragment/meta/向量。",
 		inputSchema: {
 			type: "object" as const,
 			properties: {

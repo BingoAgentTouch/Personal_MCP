@@ -3,6 +3,15 @@ import * as path from "node:path";
 import type { FragmentInput, FragmentMeta, FragmentWeightMeta } from "../types.js";
 import { getTurnRangeText } from "./raw.js";
 
+export interface PreparedFragment {
+	fragment_id: string;
+	date: string;
+	id: string;
+	md: string;
+	weight_meta: FragmentWeightMeta;
+	meta: FragmentMeta;
+}
+
 const BASE = path.resolve("memory/fragments");
 
 function ensureDateDir(date: string): string {
@@ -140,22 +149,17 @@ function parseFragmentMD(md: string, date: string, id: string): FragmentMeta | n
 	};
 }
 
-/** 创建任务-结果片段 */
-export function createFragment(input: FragmentInput): { fragment_id: string; meta: FragmentMeta } {
+export function prepareFragment(input: FragmentInput): PreparedFragment {
 	const turnsText = getTurnRangeText(input.date, input.start_turn_id, input.end_turn_id);
 	const num = nextFragNum(input.date);
 	const id = `frag_${String(num).padStart(3, "0")}`;
-	const md = buildFragmentMD(input, turnsText);
-	fs.writeFileSync(fragPath(input.date, id), md, "utf-8");
-
-	// 落初始权重 meta（第一期只由 importance 决定，其余为占位默认）
-	writeMeta(input.date, id, {
+	const fragment_id = `${input.date}/${id}`;
+	const weight_meta: FragmentWeightMeta = {
 		...DEFAULT_META,
 		importance: input.importance ?? DEFAULT_META.importance,
-	});
-
+	};
 	const meta: FragmentMeta = {
-		fragment_id: `${input.date}/${id}`,
+		fragment_id,
 		date: input.date,
 		start_turn_id: input.start_turn_id,
 		end_turn_id: input.end_turn_id,
@@ -166,8 +170,31 @@ export function createFragment(input: FragmentInput): { fragment_id: string; met
 		agent_id: input.agent_id,
 		turns_text: turnsText,
 	};
+	return {
+		fragment_id,
+		date: input.date,
+		id,
+		md: buildFragmentMD(input, turnsText),
+		weight_meta,
+		meta,
+	};
+}
 
-	return { fragment_id: `${input.date}/${id}`, meta };
+export function commitPreparedFragment(prepared: PreparedFragment): { fragment_id: string; meta: FragmentMeta } {
+	fs.writeFileSync(fragPath(prepared.date, prepared.id), prepared.md, "utf-8");
+	writeMeta(prepared.date, prepared.id, prepared.weight_meta);
+	return { fragment_id: prepared.fragment_id, meta: prepared.meta };
+}
+
+export function rollbackPreparedFragment(prepared: PreparedFragment): void {
+	for (const filePath of [fragPath(prepared.date, prepared.id), metaPath(prepared.date, prepared.id)]) {
+		if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+	}
+}
+
+/** 创建任务-结果片段 */
+export function createFragment(input: FragmentInput): { fragment_id: string; meta: FragmentMeta } {
+	return commitPreparedFragment(prepareFragment(input));
 }
 
 /** 根据 ID 读取片段 */

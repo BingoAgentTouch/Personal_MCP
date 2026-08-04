@@ -107,6 +107,80 @@ export interface EmbeddingGenerationRecord {
 	state: "materialized" | "failed";
 }
 
+export type EmbeddingDeltaState = "active" | "sealed" | "merged" | "failed";
+export type EmbeddingDeltaRecordState =
+	| "pending"
+	| "materialized"
+	| "tombstone"
+	| "source_missing"
+	| "encode_failed"
+	| "vector_corrupt"
+	| "dimension_mismatch"
+	| "hash_mismatch"
+	| "generation_mismatch"
+	| "stale";
+
+export interface EmbeddingDeltaManifest {
+	delta_schema_version: number;
+	delta_id: string;
+	state: EmbeddingDeltaState;
+	base_generation_id: string;
+	base_manifest_hash: string;
+	representation_identity_hash: string;
+	document_recipe_id: string;
+	document_recipe_version: number;
+	query_recipe_id: string;
+	query_recipe_version: number;
+	source_schema_version: number;
+	sequence: number;
+	record_count: number;
+	materialized_count: number;
+	failed_count: number;
+	created_at: string;
+	manifest_content_hash: string;
+}
+
+export interface EmbeddingDeltaRecord {
+	record_schema_version: number;
+	delta_id: string;
+	fragment_id: string;
+	state: EmbeddingDeltaRecordState;
+	operation: "create" | "update" | "delete" | "reconcile";
+	source_content_hash: string | null;
+	constructed_input_hash: string | null;
+	vector_hash: string | null;
+	vector_dimension: number | null;
+	representation_identity_hash: string;
+	tokens: unknown;
+	created_at: string;
+	failure: string | null;
+}
+
+export type EmbeddingLayer = "base" | "delta";
+export type EmbeddingHealthStatus = "healthy" | "healthy_with_delta" | "degraded" | "invalid";
+
+export interface EmbeddingHealthSnapshot {
+	active_generation_id: string | null;
+	active_manifest_hash: string | null;
+	representation_identity_hash: string | null;
+	active_delta_id: string | null;
+	delta_state: EmbeddingDeltaState | null;
+	source_fragments: number;
+	base_generation_fragments: number;
+	delta_materialized_fragments: number;
+	delta_tombstones: number;
+	effective_vectors: number;
+	missing_vectors: number;
+	stale_vectors: number;
+	corrupt_vectors: number;
+	dimension_mismatches: number;
+	source_hash_mismatches: number;
+	identity_mismatches: number;
+	base_coverage: number;
+	effective_coverage: number;
+	status: EmbeddingHealthStatus;
+}
+
 // ============================================================
 // 层级 2：每日总结
 // ============================================================
@@ -150,6 +224,9 @@ export interface SearchResultItem {
 	date: string;
 	turns_range: string;
 	agent_id?: string;
+	embedding_layer?: EmbeddingLayer;
+	base_generation_id?: string | null;
+	delta_id?: string | null;
 	hierarchy: {
 		daily_summary: string | null;
 		topic_name: string;
@@ -160,6 +237,7 @@ export interface SearchResultItem {
 export interface SearchResults {
 	query: string;
 	results: SearchResultItem[];
+	health?: EmbeddingHealthSnapshot;
 }
 
 // ============================================================

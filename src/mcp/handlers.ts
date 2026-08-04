@@ -20,7 +20,18 @@ import type {
 	TopicConsolidateResult,
 } from "../types.js";
 import { appendTurn, readTurns, listDates as listRawDates } from "../storage/raw.js";
-import { createFragment, getFragment, getFragmentRaw, listAllFragmentIds, metaPath, writeMeta, DEFAULT_META } from "../storage/fragments.js";
+import {
+	commitPreparedFragment,
+	createFragment,
+	getFragment,
+	getFragmentRaw,
+	listAllFragmentIds,
+	metaPath,
+	prepareFragment,
+	rollbackPreparedFragment,
+	writeMeta,
+	DEFAULT_META,
+} from "../storage/fragments.js";
 import { createDailySummary, getDailySummary } from "../storage/daily.js";
 import {
 	upsertTopic,
@@ -34,10 +45,16 @@ import {
 } from "../storage/topics.js";
 import { search } from "../search/retriever.js";
 import { logSearch, logGetFragment } from "../storage/signals.js";
-import { encode, isFallbackMode } from "../embedding/provider.js";
 import { buildDocumentInput, sourceContentHash } from "../embedding/builder.js";
-import { getActiveGeneration, writeGenerationVector } from "../embedding/generation.js";
-import { embeddingPath } from "../storage/fragments.js";
+import { encodeStrict, isFallbackMode } from "../embedding/provider.js";
+import { getActiveGeneration } from "../embedding/generation.js";
+import {
+	assertDeltaWritable,
+	assertWritesAllowed,
+	createPendingDeltaRecord,
+	ensureActiveDelta,
+	upsertDeltaRecord,
+} from "../embedding/delta.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -49,59 +66,115 @@ export async function handleStoreTurn(input: StoreTurnInput) {
 }
 
 export async function handleCreateFragment(input: CreateFragmentInput) {
-	const importance = input.importance ?? DEFAULT_META.importance;
-	const { fragment_id, meta } = createFragment({ ...input, agent_id: input.agent_id, importance });
 	const active = getActiveGeneration();
-	const built = active
-		? await buildDocumentInput({
-			task_desc: meta.task_desc,
-			result_desc: meta.result_desc,
-			tags: meta.tags,
-			topic_name: meta.topic_name,
-			turns_text: meta.turns_text,
-		})
-		: null;
-	// 无 active generation 时保留 legacy 公式，避免把 structured 向量写入裸 legacy 目录。
-	const embedText = built?.text ?? `${meta.task_desc}\n${meta.result_desc}\n${meta.turns_text}`;
-	const embedding = await encode(embedText);
-	if (embedding.length === 0) {
-		console.error(`[embedding] ⚠ 片段 ${fragment_id} 未生成向量（降级模式），未写入向量目录。`);
-	} else if (active && built) {
-		writeGenerationVector(active, fragment_id, embedding, {
-			source_content_hash: sourceContentHash({
-				task_desc: meta.task_desc,
-				result_desc: meta.result_desc,
-				tags: meta.tags,
-				topic_name: meta.topic_name,
-				turns_text: meta.turns_text,
-			}),
-			input_hash: built.input_hash,
-			tokens: built.tokens as unknown as Record<string, unknown>,
-		});
-	} else {
-		const ep = embeddingPath(input.date, fragment_id.split("/")[1]);
-		fs.writeFileSync(ep, JSON.stringify(embedding), "utf-8");
+	if (!active) {
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify(
+						{
+							code: "ACTIVE_GENERATION_REQUIRED",
+							message: "当前没有 active embedding generation；D1 已移除 legacy 裸向量写入路径，本次未创建 fragment。",
+							recommended_action: "请先使用 migrate_embeddings.mjs build/validate/switch 创建并激活 generation，然后再写入 fragment。",
+						},
+						null,
+						2,
+					),
+				},
+			],
+			isError: true,
+		};
 	}
+	try {
+		assertWritesAllowed();
+		ensureActiveDelta();
+		const delta = assertDeltaWritable();
+		const importance = input.importance ?? DEFAULT_META.importance;
+		const prepared = prepareFragment({ ...input, agent_id: input.agent_id, importance });
+		const built = await buildDocumentInput({
+			task_desc: prepared.meta.task_desc,
+			result_desc: prepared.meta.result_desc,
+			tags: prepared.meta.tags,
+			topic_name: prepared.meta.topic_name,
+			turns_text: prepared.meta.turns_text,
+		}, active);
+		const embedding = await encodeStrict(built.text);
+		const sourceHash = sourceContentHash({
+			task_desc: prepared.meta.task_desc,
+			result_desc: prepared.meta.result_desc,
+			tags: prepared.meta.tags,
+			topic_name: prepared.meta.topic_name,
+			turns_text: prepared.meta.turns_text,
+		});
+		const { fragment_id, meta } = commitPreparedFragment(prepared);
+		try {
+			upsertDeltaRecord(delta, fragment_id, embedding, built.input_hash, sourceHash, built.tokens, "create");
+		} catch (error) {
+			rollbackPreparedFragment(prepared);
+			createPendingDeltaRecord(delta, fragment_id, error instanceof Error ? error.message : String(error));
+			throw error;
+		}
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify(
+						{
+							fragment_id,
+							task_desc: meta.task_desc,
+							result_desc: meta.result_desc,
+							turns_length: meta.turns_text.length,
+							embedding_dim: embedding.length,
+							embedding_mode: isFallbackMode() ? "fallback" : "transformers",
+							embedding_status: "ready",
+							embedding_layer: "delta",
+							embedding_generation: active.generation_id,
+							embedding_delta_id: delta.delta_id,
+						},
+						null,
+						2,
+					),
+				},
+			],
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const code = message === "compacting" ? "COMPACTION_IN_PROGRESS" : "DELTA_WRITE_FAILED";
+		return {
+			content: [{ type: "text" as const, text: JSON.stringify({ code, message }, null, 2) }],
+			isError: true,
+		};
+	}
+}
 
-	return {
-		content: [
-			{
-				type: "text" as const,
-				text: JSON.stringify(
-					{
-						fragment_id,
-						task_desc: meta.task_desc,
-						result_desc: meta.result_desc,
-						turns_length: meta.turns_text.length,
-						embedding_dim: embedding.length,
-						embedding_mode: isFallbackMode() ? "fallback" : "transformers",
-					},
-					null,
-					2,
-				),
-			},
-		],
-	};
+async function syncFragmentToDelta(fragmentId: string, operation: "create" | "update" | "reconcile" = "update"): Promise<void> {
+	const active = getActiveGeneration();
+	if (!active) return;
+	assertWritesAllowed();
+	ensureActiveDelta();
+	const delta = assertDeltaWritable();
+	const fragment = getFragment(fragmentId);
+	if (!fragment) {
+		createPendingDeltaRecord(delta, fragmentId, "fragment_missing_after_update");
+		return;
+	}
+	const built = await buildDocumentInput({
+		task_desc: fragment.task_desc,
+		result_desc: fragment.result_desc,
+		tags: fragment.tags,
+		topic_name: fragment.topic_name,
+		turns_text: fragment.turns_text,
+	}, active);
+	const embedding = await encodeStrict(built.text);
+	const sourceHash = sourceContentHash({
+		task_desc: fragment.task_desc,
+		result_desc: fragment.result_desc,
+		tags: fragment.tags,
+		topic_name: fragment.topic_name,
+		turns_text: fragment.turns_text,
+	});
+	upsertDeltaRecord(delta, fragmentId, embedding, built.input_hash, sourceHash, built.tokens, operation);
 }
 
 export async function handleCreateDailySummary(input: CreateDailySummaryInput) {
@@ -353,7 +426,6 @@ export async function handleConsolidateTopics(input: ConsolidateTopicsInput) {
 	}
 	const result: TopicConsolidateResult = {};
 
-	// ---- detect ----
 	if (input.action === "detect") {
 		const topicNames = listTopics();
 		result.total_topics = topicNames.length;
@@ -382,16 +454,24 @@ export async function handleConsolidateTopics(input: ConsolidateTopicsInput) {
 		pairs.sort((a, b) => b.similarity - a.similarity);
 		result.pairs = pairs;
 		result.total_pairs = pairs.length;
-
 		return {
 			content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
 		};
 	}
 
-	// ---- execute ----
 	if (input.action === "execute") {
 		const merges: MergePlan[] = input.merges ?? [];
 		const dryRun = input.dry_run ?? false;
+		if (!dryRun) {
+			try {
+				assertWritesAllowed();
+			} catch {
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify({ code: "COMPACTION_IN_PROGRESS", message: "compacting" }, null, 2) }],
+					isError: true,
+				};
+			}
+		}
 		const plan = planTopicConsolidationBatch(merges, FRAGMENTS_BASE);
 		const plannedByGroup = new Map(plan.groups.map((group) => [group.group_index, group]));
 		const merged: MergeResultItem[] = [];
@@ -433,6 +513,20 @@ export async function handleConsolidateTopics(input: ConsolidateTopicsInput) {
 			if (commit.recovery_failed) result.recovery_failed = true;
 			if (commit.error) {
 				result.errors = [{ group_index: -1, error: commit.error }];
+				for (const item of merged) item.status = "error";
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+					isError: true,
+				};
+			}
+			try {
+				for (const group of plan.groups) {
+					for (const update of group.fragment_updates) {
+						await syncFragmentToDelta(update.fragment_id, "update");
+					}
+				}
+			} catch (error) {
+				result.errors = [{ group_index: -1, error: error instanceof Error ? error.message : String(error) }];
 				for (const item of merged) item.status = "error";
 				return {
 					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],

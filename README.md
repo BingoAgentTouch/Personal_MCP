@@ -105,14 +105,22 @@ console.log("OK dim=", r.data.length);   // 期望 384
 
 ## 回填历史片段
 
-如果某段时间跑在降级模式,那期间的片段没有向量(或为空)。修好模型后,一次性回填:
+如果某段时间跑在降级模式,那期间的片段没有向量(或为空),且**当前存在 active embedding generation 时不能直接运行旧回填脚本**。D0 会保护性拒绝对 active generation 的写入，避免把不可变快照当作可写目录。
 
 ```bash
 cd <记忆库所在的项目根>          # 必须,存储根相对 CWD
 node <绝对路径>/backfill_embeddings.mjs
 ```
 
-脚本会遍历所有片段、用真实模型重算并覆盖 `.embedding`,末尾打印成功/跳过数;若仍在降级模式会非零退出并提示。
+脚本仅在没有 active generation 时回填 legacy `.embedding`；如果检测到 active generation，会以非零状态退出并提示使用：
+
+```bash
+node <绝对路径>/migrate_embeddings.mjs build --generation gen_YYYYMMDD_xxx
+node <绝对路径>/migrate_embeddings.mjs validate --generation gen_YYYYMMDD_xxx
+node <绝对路径>/migrate_embeddings.mjs switch --generation gen_YYYYMMDD_xxx
+```
+
+当前简化模型下，服务器启动不会自动做 orphan reconcile 或后台修复；如果你怀疑 delta/base 状态不一致，直接走手动 rebuild + switch。
 
 ---
 
@@ -128,15 +136,15 @@ node <绝对路径>/backfill_embeddings.mjs
 | `memory_get_fragment` / `memory_get_daily` / `memory_get_topic` | 按 ID 读取完整内容 |
 | `memory_list_dates` | 列出所有有记录的日期 |
 | `memory_get_raw_turns` | 按 exact/range/recent/all 四种互斥模式读取 L0 逐轮原文，可先按 `agent_id` 过滤 |
-| `memory_consolidate_topics` | 检测中文相似 Topic；经审阅后支持 dry-run、整批预检、事务式合并与 fragment 回指修复 |
+| `memory_consolidate_topics` | 检测中文相似 Topic；经审阅后支持 dry-run、整批预检、执行合并与 fragment 回指修复 |
 
-### Topic 合并安全语义
+### Topic 合并说明
 
-`memory_consolidate_topics(action="execute")` 会先在内存中建立完整批次计划。任一 active 合并组存在 source/target 冲突、非法 fragment ID、路径越界、fragment 缺失或旧 Topic 回指不唯一时，整批返回 `validated: false` 和 MCP `isError: true`，不会创建 `.trash` 或 `.transactions`，也不会改写任何 live 文件。
+`memory_consolidate_topics(action="execute")` 会先做整批校验。任一 active 合并组存在 source/target 冲突、非法 fragment ID、路径越界、fragment 缺失或旧 Topic 回指不唯一时，整批返回 `validated: false` 和 MCP `isError: true`，不会改写 live 文件。
 
-`dry_run: true` 使用与正式执行相同的计划和预检，只返回 `changes`，不写文件。正式提交会在 `memory/topics/.transactions/<operation_id>/` 建立快照和 staged 内容，按 target → fragment → `.trash` source 备份 → source 删除的顺序提交；可捕获异常会恢复执行前内容。若回滚本身失败，返回 `recovery_failed: true` 与 `transaction_path`，并保留事务目录供人工恢复。
+`dry_run: true` 使用与正式执行相同的计划和预检，只返回 `changes`，不写文件。正式执行会更新 target、改写 fragment 回指，并把 source 主题备份到 `.trash` 后删除。
 
-当前保证范围是**进程内可捕获异常**；断电、操作系统崩溃和强杀进程后的自动恢复尚未实现。
+这是面向个人项目的简化维护模型：优先保证行为直白、出问题后可人工检查；不承诺工业级自动恢复或复杂维护编排。
 
 ---
 
