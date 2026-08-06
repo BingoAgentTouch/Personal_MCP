@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import type { EmbeddingLayer, SearchResultItem, SearchResults } from "../types.js";
+import type { EmbeddingLayer, FragmentWeightMeta, SearchResultItem, SearchResults } from "../types.js";
 import { listAllFragmentIds, getFragment, readMeta } from "../storage/fragments.js";
 import { getDailySummaryMeta } from "../storage/daily.js";
 import { getTopic } from "../storage/topics.js";
@@ -16,6 +16,13 @@ import { buildEffectiveEmbeddingView, deltaVectorPath } from "../embedding/delta
 export function decayFloor(importance: number): number {
 	const imp = Math.max(0, Math.min(1, importance));
 	return 0.4 * imp + 0.3;
+}
+
+/** P3 Phase 1c：earned 只能提升有效重要性，不能降低先天 importance。 */
+export function effectiveImportance(meta: Pick<FragmentWeightMeta, "importance" | "earned_importance">): number {
+	const base = Number.isFinite(meta.importance) ? meta.importance : 0.5;
+	const earned = Number.isFinite(meta.earned_importance) ? meta.earned_importance ?? 0 : 0;
+	return Math.max(0, Math.min(1, Math.max(base, earned)));
 }
 
 async function loadAllEmbeddings(): Promise<{
@@ -53,7 +60,7 @@ async function loadAllEmbeddings(): Promise<{
 
 /**
  * 对候选池（已按 raw similarity 排好序）套第一期权重重排，取 top_k。
- *   final_score = similarity × decayFloor(importance)
+ *   final_score = similarity × decayFloor(effectiveImportance(meta))
  * 读 meta 只发生在候选池（top_k×3），是相对全量检索的边际成本。
  */
 function weightAndRerank(
@@ -67,7 +74,7 @@ function weightAndRerank(
 
 	const weighted = pool.map((s) => {
 		const meta = readMeta(s.id);
-		const weight = decayFloor(meta.importance);
+		const weight = decayFloor(effectiveImportance(meta));
 		return {
 			id: s.id,
 			layer: s.layer,

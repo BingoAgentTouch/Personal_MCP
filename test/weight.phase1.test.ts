@@ -6,7 +6,7 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { decayFloor } from "../src/search/retriever.ts";
+import { decayFloor, effectiveImportance } from "../src/search/retriever.ts";
 import { DEFAULT_META } from "../src/storage/fragments.ts";
 
 describe("decay_floor 映射（decay_floor = 0.4×importance + 0.3）", () => {
@@ -48,6 +48,22 @@ describe("相对重排（final = similarity × decay_floor）", () => {
 		const c = 0.75 * decayFloor(0.7); // 功能实现，很相关又较重要
 		const a = 0.55 * decayFloor(0.95); // 架构决策，中等相关
 		assert.ok(c > a, `c=${c} a=${a}`);
+	});
+});
+
+describe("P3 Phase 1c earned 重排", () => {
+	test("earned 缺失时按 0 处理，不改变 base importance", () => {
+		assert.equal(effectiveImportance({ importance: 0.7 }), 0.7);
+	});
+	test("earned 低于 base 时不会降低权重", () => {
+		const base = effectiveImportance({ importance: 0.7, earned_importance: 0.1 });
+		assert.equal(base, 0.7);
+		assert.equal(decayFloor(base), decayFloor(0.7));
+	});
+	test("earned 超过 base 时才提升有效重要性", () => {
+		const effective = effectiveImportance({ importance: 0.7, earned_importance: 0.8 });
+		assert.equal(effective, 0.8);
+		assert.ok(decayFloor(effective) > decayFloor(0.7));
 	});
 });
 

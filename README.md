@@ -169,6 +169,18 @@ node <绝对路径>/migrate_embeddings.mjs switch --generation gen_YYYYMMDD_xxx
 
 ---
 
+## 记忆重要性评分
+
+新建 fragment 时请保守填写 `importance`，不要把普通记忆默认评为 0.7 以上：
+
+- `0.35~0.4`：临时、局部、低复用信息
+- `0.5`：普通可复用记忆
+- `0.6~0.7`：持续有帮助或明确重要
+- `0.8`：关键架构、重要约束
+- `0.9~1.0`：核心事实，错误代价高，应该很少使用
+
+历史 fragment 的 importance 不因这次规则调整而批量改写。P3 Phase 1c 检索时使用 `max(importance, earned_importance)`，earned 只提升有效重要性，不会降低已有权重。
+
 ## 已知取舍
 
 - MiniLM 的相似度整体偏低,**0.2–0.35 就是可靠命中**,不要按 0.8 的直觉设阈值。

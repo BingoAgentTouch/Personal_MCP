@@ -37,7 +37,7 @@ export interface FragmentInput {
 	tags: string[];
 	topic_name: string;
 	agent_id?: string;
-	importance?: number; // 先天重要性 0.0~1.0，缺省 0.5
+	importance?: number; // 先天重要性 0.0~1.0，缺省 0.5；新片段按保守分档评分，普通记忆不要默认 0.7+
 }
 
 // ============================================================
@@ -52,6 +52,10 @@ export interface FragmentWeightMeta {
 	interval: number; // SM-2 复习间隔（天），第二期用
 	repetition: number; // SM-2 命中次数，第二期用
 	last_hit_at: string | null; // 上次命中时间 ISO，第二期用
+	earned_importance?: number; // P3 提取花费累积值，0.0~1.0
+	earned_event_count?: number; // P3 已应用事件数
+	earned_last_updated_at?: string | null; // P3 最近应用时间
+	earned_policy_version?: string | null; // P3 最近应用 policy
 }
 
 // ============================================================
@@ -260,7 +264,7 @@ export interface CreateFragmentInput {
 	tags: string[];
 	topic_name: string;
 	agent_id?: string;
-	importance?: number; // 先天重要性 0.0~1.0，缺省 0.5
+	importance?: number; // 先天重要性 0.0~1.0，缺省 0.5；新片段按保守分档评分，普通记忆不要默认 0.7+
 }
 
 export interface CreateDailySummaryInput {

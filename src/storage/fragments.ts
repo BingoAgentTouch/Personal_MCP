@@ -42,13 +42,17 @@ export function metaPath(date: string, id: string): string {
 	return path.join(ensureDateDir(date), `${id}.meta.json`);
 }
 
-/** 默认权重元数据（缺省 importance 0.5；SM-2 字段为第二期占位） */
+/** 默认权重元数据（缺省 importance 0.5；P3 earned 字段缺省为 0） */
 export const DEFAULT_META: FragmentWeightMeta = {
 	importance: 0.5,
 	ease: 2.5,
 	interval: 1,
 	repetition: 0,
 	last_hit_at: null,
+	earned_importance: 0,
+	earned_event_count: 0,
+	earned_last_updated_at: null,
+	earned_policy_version: null,
 };
 
 /** 读取片段权重 meta，缺失/损坏时返回默认（不阻塞检索） */
@@ -62,6 +66,29 @@ export function readMeta(fragmentId: string): FragmentWeightMeta {
 	} catch {
 		return { ...DEFAULT_META };
 	}
+}
+
+/** 严格读取 P3 apply 用 meta：缺失、损坏或数值越界时失败关闭。 */
+export function readMetaStrict(fragmentId: string): { meta: FragmentWeightMeta; raw: string } {
+	const [date, id] = fragmentId.split("/");
+	if (!date || !id || fragmentId.split("/").length !== 2) throw new Error(`invalid fragment id: ${fragmentId}`);
+	const fp = metaPath(date, id);
+	if (!fs.existsSync(fp)) throw new Error(`missing fragment meta: ${fragmentId}`);
+	const raw = fs.readFileSync(fp, "utf-8");
+	let parsed: Partial<FragmentWeightMeta>;
+	try {
+		parsed = JSON.parse(raw) as Partial<FragmentWeightMeta>;
+	} catch {
+		throw new Error(`invalid fragment meta JSON: ${fragmentId}`);
+	}
+	const meta = { ...DEFAULT_META, ...parsed };
+	for (const field of ["importance", "earned_importance"] as const) {
+		const value = meta[field];
+		if (value == null || !Number.isFinite(value) || value < 0 || value > 1) throw new Error(`invalid ${field} in fragment meta: ${fragmentId}`);
+	}
+	const earnedEventCount = meta.earned_event_count;
+	if (earnedEventCount == null || !Number.isInteger(earnedEventCount) || earnedEventCount < 0) throw new Error(`invalid earned_event_count in fragment meta: ${fragmentId}`);
+	return { meta, raw };
 }
 
 /** 原子写入 meta（临时文件 + rename，避免并发产生半截 JSON） */
