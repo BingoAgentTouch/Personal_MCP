@@ -11,8 +11,8 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-const ANALYZER_VERSION = "p3-phase1a-v2-pre-get";
-const REPORT_SCHEMA_VERSION = 3;
+const ANALYZER_VERSION = "p3-phase1a-v3-epoch-isolation";
+const REPORT_SCHEMA_VERSION = 4;
 const DRY_RUN_REPORT_SCHEMA_VERSION = 2;
 const EPISODE_GAP_SEC = 15 * 60;
 const COST_POLICY_VERSION = "retrieval-cost-pre-get-search-count-v1-experimental";
@@ -109,6 +109,41 @@ function safeNumber(value) {
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function observationMetadata(value) {
+	if (value.signal_schema_version !== 2) {
+		return {
+			key: "legacy/unversioned",
+			signal_schema_version: null,
+			generation_id: null,
+			representation_identity_hash: null,
+			retrieval_epoch: null,
+			raw_similarity_mode: null,
+		};
+	}
+	const generationId = typeof value.generation_id === "string" ? value.generation_id : null;
+	const representationIdentityHash = typeof value.representation_identity_hash === "string" ? value.representation_identity_hash : null;
+	const retrievalEpoch = typeof value.retrieval_epoch === "string" ? value.retrieval_epoch : null;
+	const rawSimilarityMode = typeof value.raw_similarity_mode === "string" ? value.raw_similarity_mode : null;
+	if (!generationId || !representationIdentityHash || !retrievalEpoch || !rawSimilarityMode) {
+		return {
+			key: "v2/incomplete",
+			signal_schema_version: 2,
+			generation_id: generationId,
+			representation_identity_hash: representationIdentityHash,
+			retrieval_epoch: retrievalEpoch,
+			raw_similarity_mode: rawSimilarityMode,
+		};
+	}
+	return {
+		key: `v2/${generationId}/${representationIdentityHash}/${retrievalEpoch}/${rawSimilarityMode}`,
+		signal_schema_version: 2,
+		generation_id: generationId,
+		representation_identity_hash: representationIdentityHash,
+		retrieval_epoch: retrievalEpoch,
+		raw_similarity_mode: rawSimilarityMode,
+	};
+}
+
 function readJsonl(signalsRoot, name) {
 	const filePath = path.join(signalsRoot, name);
 	if (!fs.existsSync(filePath)) return { name, filePath, content: "", rows: [], invalidLines: [] };
@@ -150,7 +185,9 @@ function normalizeSearchRows(source) {
 				raw_similarity: safeNumber(result.raw_similarity),
 				weight: safeNumber(result.weight),
 				score: safeNumber(result.score),
+				matched_view: typeof result.matched_view === "string" ? result.matched_view : null,
 			}));
+		const observation = observationMetadata(value);
 		valid.push({
 			ts: value.ts,
 			timestamp,
@@ -158,6 +195,7 @@ function normalizeSearchRows(source) {
 			agent_key: agentKey(value.agent_id),
 			query_hash: queryHash(value.query),
 			results,
+			observation,
 			source_line: row.source_line,
 		});
 	}
@@ -188,23 +226,24 @@ function normalizeGetRows(source) {
 	return { valid, invalid };
 }
 
-function episodeId(agent, searches) {
-	return `ep_${hash(canonicalJson({ agent, start: searches[0].ts, lines: searches.map((search) => search.source_line) })).slice(7, 23)}`;
+function episodeId(agent, observationKey, searches) {
+	return `ep_${hash(canonicalJson({ agent, observation_key: observationKey, start: searches[0].ts, lines: searches.map((search) => search.source_line) })).slice(7, 23)}`;
 }
 
 function buildEpisodes(searches) {
 	const groups = new Map();
 	for (const search of searches) {
-		if (!groups.has(search.agent_key)) groups.set(search.agent_key, []);
-		groups.get(search.agent_key).push(search);
+		const key = `${search.agent_key}::${search.observation.key}`;
+		if (!groups.has(key)) groups.set(key, { agent: search.agent_key, observation: search.observation, rows: [] });
+		groups.get(key).rows.push(search);
 	}
 	const episodes = [];
-	for (const [agent, rows] of groups) {
+	for (const { agent, observation, rows } of groups.values()) {
 		rows.sort((a, b) => a.timestamp - b.timestamp || a.source_line - b.source_line);
 		let current = null;
 		for (const search of rows) {
 			if (!current || search.timestamp - current.last_timestamp > EPISODE_GAP_SEC * 1000) {
-				current = { agent, searches: [], start_timestamp: search.timestamp, last_timestamp: search.timestamp };
+				current = { agent, observation, searches: [], start_timestamp: search.timestamp, last_timestamp: search.timestamp };
 				episodes.push(current);
 			}
 			current.searches.push(search);
@@ -213,7 +252,7 @@ function buildEpisodes(searches) {
 	}
 	return episodes
 		.sort((a, b) => a.start_timestamp - b.start_timestamp)
-		.map((episode) => ({ ...episode, episode_id: episodeId(episode.agent, episode.searches) }));
+		.map((episode) => ({ ...episode, episode_id: episodeId(episode.agent, episode.observation.key, episode.searches) }));
 }
 
 function searchesBeforeOrAt(episode, timestamp) {
@@ -322,6 +361,8 @@ function summarizeEpisode(episode, assignedGets, ambiguousGets) {
 	return {
 		episode_id: episode.episode_id,
 		agent_id: episode.agent === "∅" ? null : episode.agent,
+		observation: episode.observation,
+		observation_key: episode.observation.key,
 		search_count: episode.searches.length,
 		start_ts: episode.searches[0].ts,
 		end_ts: episode.searches.at(-1).ts,
@@ -429,6 +470,8 @@ export function buildDryRunRecord(episode, memoryRoot, sourceHash, policyVersion
 		skip_reasons: episode.skip_reasons,
 		idempotency_key: episode.eligible_reward ? idempotencyKeys[0] : null,
 		idempotency_keys: idempotencyKeys,
+		observation_key: episode.observation_key,
+		observation: episode.observation,
 		policy_version: policyVersion,
 		source_hash: sourceHash,
 	};
@@ -484,6 +527,12 @@ export function applyDryRunReport(memoryRoot, dryRunReportPath, ledgerPath = pat
 	}
 	if (report.analyzer_version !== ANALYZER_VERSION || report.policy?.cost_policy_version !== COST_POLICY_VERSION) {
 		throw new Error("dry-run analyzer or policy version mismatch");
+	}
+	if (!report.observation_group || typeof report.observation_group.key !== "string") {
+		throw new Error("dry-run report must select one observation group before apply");
+	}
+	if ((report.records ?? []).some((record) => record.observation_key !== report.observation_group.key)) {
+		throw new Error("dry-run report mixes observation groups");
 	}
 	const actualSourceHash = currentSourceHash(memoryRoot);
 	if (actualSourceHash !== report.source_hash) throw new Error(`source hash mismatch: report=${report.source_hash}, current=${actualSourceHash}`);
@@ -566,6 +615,19 @@ function createReports(memoryRoot, reportPath, dryRunPath) {
 	const confirmedBy = { user: 0, agent: 0, null: 0 };
 	for (const get of gets.valid) confirmedBy[get.confirmed_by ?? "null"] = (confirmedBy[get.confirmed_by ?? "null"] ?? 0) + 1;
 	const sourceHash = hash(canonicalJson({ search_jsonl: searchSource.content, get_fragment_jsonl: getSource.content }));
+	const observationBuckets = new Map();
+	for (const episode of episodeRows) {
+		if (!observationBuckets.has(episode.observation_key)) observationBuckets.set(episode.observation_key, []);
+		observationBuckets.get(episode.observation_key).push(episode);
+	}
+	const observationGroups = [...observationBuckets.entries()].map(([observationKey, groupedEpisodes]) => ({
+		observation: groupedEpisodes[0].observation,
+		observation_key: observationKey,
+		episodes: groupedEpisodes.length,
+		targeted_episodes: groupedEpisodes.filter((episode) => episode.target_fragment != null).length,
+		eligible_reward_episodes: groupedEpisodes.filter((episode) => episode.eligible_reward).length,
+		iteration_histogram: histogram(groupedEpisodes.map((episode) => episode.search_count)),
+	})).sort((left, right) => left.observation_key.localeCompare(right.observation_key));
 	const phase0 = {
 		report_schema_version: REPORT_SCHEMA_VERSION,
 		report_type: "p3-phase0-signal-analysis",
@@ -607,6 +669,7 @@ function createReports(memoryRoot, reportPath, dryRunPath) {
 			no_get_target_episodes: episodeRows.filter((episode) => episode.skip_reason === "no_get_target").length,
 			pre_get_eligible_reward_episodes: episodeRows.filter((episode) => episode.eligible_reward).length,
 		},
+		observation_groups: observationGroups,
 		confirmed_by: confirmedBy,
 		iteration_histogram: histogram(iterationCounts),
 		pre_get_iteration_histogram: histogram(episodeRows.filter((episode) => episode.pre_get_search_count > 0).map((episode) => episode.pre_get_search_count)),
@@ -616,7 +679,9 @@ function createReports(memoryRoot, reportPath, dryRunPath) {
 		ambiguous_gets: attached.ambiguousGets,
 		episodes: episodeRows,
 	};
-	const dryRunRecords = episodeRows.map((episode) => buildDryRunRecord(episode, memoryRoot, sourceHash));
+	const selectedObservationKey = observationGroups.length === 1 ? observationGroups[0].observation_key : null;
+	const selectedEpisodes = selectedObservationKey ? episodeRows.filter((episode) => episode.observation_key === selectedObservationKey) : [];
+	const dryRunRecords = selectedEpisodes.map((episode) => buildDryRunRecord(episode, memoryRoot, sourceHash));
 	const dryRun = {
 		report_schema_version: DRY_RUN_REPORT_SCHEMA_VERSION,
 		report_type: "p3-phase1a-dry-run",
@@ -628,6 +693,7 @@ function createReports(memoryRoot, reportPath, dryRunPath) {
 		phase0_report_path: reportPath,
 		source_hash: sourceHash,
 		policy: phase0.policy,
+		observation_group: selectedObservationKey ? { key: selectedObservationKey, ...observationGroups[0].observation } : null,
 		counts: {
 			episodes: dryRunRecords.length,
 			eligible_reward: dryRunRecords.filter((record) => record.eligible_reward).length,
@@ -636,6 +702,8 @@ function createReports(memoryRoot, reportPath, dryRunPath) {
 			iteration_1_skipped: dryRunRecords.filter((record) => record.skip_reasons?.includes("iteration_1_without_user_confirmation")).length,
 			one_search_no_cost: dryRunRecords.filter((record) => record.skip_reasons?.includes("one_search_no_cost")).length,
 			no_get_target: dryRunRecords.filter((record) => record.skip_reasons?.includes("no_get_target")).length,
+			observation_groups_detected: observationGroups.length,
+			mixed_observations_blocked: selectedObservationKey === null,
 		},
 		records: dryRunRecords,
 	};

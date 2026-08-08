@@ -42,6 +42,7 @@ function loadModules() {
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/provider.js")).href),
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/generation.js")).href),
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/delta.js")).href),
+		import(pathToFileURL(path.join(ROOT, "dist/embedding/evidence-policy.js")).href),
 	]);
 }
 function parseRepresentationKind(value) {
@@ -106,6 +107,9 @@ async function validateGeneration(generationId) {
 	const sharedValidation = generation.validateGenerationRecords(manifest, index, result.rows, result.hash);
 	const failures = [...sharedValidation.failures];
 	if (!manifestIdentityMatches(manifest, tokenizer)) failures.push("runtime identity mismatch");
+	if (representationKind === "multiview" && (!manifest.evidence_policy || manifest.evidence_policy.status !== "validated" || manifest.evidence_policy.policy_id !== manifest.evidence_policy_id)) {
+		failures.push("validated evidence policy snapshot missing");
+	}
 	const validation = { ...sharedValidation, failures, valid: failures.length === 0 };
 	return {
 		manifest,
@@ -119,11 +123,12 @@ async function validateGeneration(generationId) {
 }
 function report(payload) { console.log(JSON.stringify(payload, null, 2)); }
 
-const [fragments, builderModule, providerModule, generationModule, deltaModule] = await loadModules();
+const [fragments, builderModule, providerModule, generationModule, deltaModule, evidencePolicyModule] = await loadModules();
 const builder = builderModule;
 const provider = providerModule;
 const generation = generationModule;
 const delta = deltaModule;
+const evidencePolicy = evidencePolicyModule;
 
 if (!command || !["inventory", "build", "validate", "switch", "rollback"].includes(command)) {
 	console.error("Usage: node migrate_embeddings.mjs inventory|build|validate|switch|rollback [--generation ID] [--representation single|multiview] [--memory-root PATH]");
@@ -140,7 +145,13 @@ if (command === "build") {
 	const generationId = options.get("generation") || `gen_${Date.now()}`;
 	const representationKind = parseRepresentationKind(options.get("representation"));
 	const result = inventory(fragments);
-	await generation.createGeneration(generationId, result.hash, 384, representationKind);
+	const policyPath = options.get("evidence-policy");
+	if (representationKind === "multiview" && !policyPath) throw new Error("--evidence-policy is required for multiview build");
+	const tokenizer = await builder.getTokenizerManifest();
+	const validatedPolicy = representationKind === "multiview"
+		? evidencePolicy.readValidatedEvidencePolicy(path.resolve(policyPath), evidencePolicy.currentEvidencePolicyScope(provider.MODEL_ID, tokenizer.tokenizer_id))
+		: null;
+	await generation.createGeneration(generationId, result.hash, 384, representationKind, validatedPolicy);
 	const buildManifest = generation.setGenerationExpectedCount(generationId, result.rows.length);
 	let ok = 0;
 	const failures = [];

@@ -222,6 +222,11 @@ describe("C-0/C-1 multiview materialization", () => {
 		assert.equal("view_id" in item, false);
 		assert.equal("source_spans" in item, false);
 		assert.equal("vector" in item, false);
+		assert.equal(typeof item.matched_view, "string");
+		assert.ok("matched_source_range" in item);
+		assert.ok("matched_snippet" in item);
+		assert.ok("snippet_anchor" in item);
+		assert.equal(item.raw_similarity_mode, "fragment-summary-only-shadow-v1");
 	});
 
 	test("rejects invalid view sets before creating sidecar or index entries", async () => {

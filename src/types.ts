@@ -81,6 +81,28 @@ export interface EmbeddingViewDisclosure {
 	snippet_anchor: "view_fallback";
 }
 
+/** Retrieval presentation metadata is additive: it never changes fragment identity or ranking. */
+export type RawSimilarityMode =
+	| "fragment-single-vector-v1"
+	| "fragment-max-view-v1"
+	| "fragment-summary-only-shadow-v1"
+	| "fragment-fallback-jaccard-v1";
+
+export type SearchSnippetAnchor = "lexical_overlap" | "view_fallback" | null;
+
+/** Immutable evidence-gate decision copied into every production multiview identity. */
+export interface EvidenceGatePolicySnapshot {
+	policy_schema_version: 1;
+	policy_id: string;
+	status: "validated";
+	calibration_scope_hash: string;
+	calibration_artifact_hash: string;
+	evidence_threshold: number;
+	raw_similarity_mode: "fragment-max-view-v1";
+	development_dataset_hash: string;
+	holdout_dataset_hash: string;
+}
+
 export interface EmbeddingMaterializedView {
 	view_id: string;
 	kind: EmbeddingViewKind;
@@ -102,6 +124,7 @@ export interface EmbeddingGenerationManifest {
 	view_schema_version?: number | null;
 	aggregation_mode?: string;
 	evidence_policy_id?: string | null;
+	evidence_policy?: EvidenceGatePolicySnapshot | null;
 	retrieval_epoch?: string;
 	document_recipe_id: string;
 	document_recipe_version: number;
@@ -175,6 +198,7 @@ export interface EmbeddingDeltaManifest {
 	view_schema_version?: number | null;
 	aggregation_mode?: string;
 	evidence_policy_id?: string | null;
+	evidence_policy?: EvidenceGatePolicySnapshot | null;
 	retrieval_epoch?: string;
 	base_generation_id: string;
 	base_manifest_hash: string;
@@ -285,6 +309,15 @@ export interface SearchResultItem {
 	embedding_layer?: EmbeddingLayer;
 	base_generation_id?: string | null;
 	delta_id?: string | null;
+	matched_view: string | null;
+	matched_source_range: EmbeddingSourceSpan | null;
+	matched_snippet: string | null;
+	snippet_anchor: SearchSnippetAnchor;
+	generation_id: string | null;
+	representation_identity_hash: string | null;
+	retrieval_epoch: string | null;
+	raw_similarity_mode: RawSimilarityMode;
+	evidence_policy_id: string | null;
 	hierarchy: {
 		daily_summary: string | null;
 		topic_name: string;

@@ -5,6 +5,7 @@ import type {
 	ActiveEmbeddingPointer,
 	EmbeddingGenerationManifest,
 	EmbeddingGenerationRecord,
+	EvidenceGatePolicySnapshot,
 	EmbeddingMaterializedView,
 	EmbeddingSourceSpan,
 	EmbeddingViewDisclosure,
@@ -222,7 +223,10 @@ function validateGenerationMultiviewManifest(manifest: EmbeddingGenerationManife
 	if (manifest.document_policy_version !== MULTIVIEW_POLICY_VERSION) throw new Error(`multiview document policy mismatch: ${manifest.generation_id}`);
 	if (!manifest.multiview_policy) throw new Error(`multiview policy missing: ${manifest.generation_id}`);
 	if (manifest.aggregation_mode !== MULTIVIEW_AGGREGATION_MODE) throw new Error(`multiview aggregation mismatch: ${manifest.generation_id}`);
-	if (manifest.evidence_policy_id !== MULTIVIEW_EVIDENCE_POLICY_ID) throw new Error(`multiview evidence policy mismatch: ${manifest.generation_id}`);
+	if (!manifest.evidence_policy_id) throw new Error(`multiview evidence policy missing: ${manifest.generation_id}`);
+	if (manifest.evidence_policy && (manifest.evidence_policy.status !== "validated" || manifest.evidence_policy.policy_id !== manifest.evidence_policy_id || manifest.evidence_policy.raw_similarity_mode !== MULTIVIEW_AGGREGATION_MODE)) {
+		throw new Error(`multiview evidence policy snapshot mismatch: ${manifest.generation_id}`);
+	}
 	if (manifest.retrieval_epoch !== MULTIVIEW_RETRIEVAL_EPOCH) throw new Error(`multiview retrieval epoch mismatch: ${manifest.generation_id}`);
 	if (manifest.document_recipe_id !== MULTIVIEW_DOCUMENT_RECIPE_ID || manifest.document_recipe_version !== MULTIVIEW_DOCUMENT_RECIPE_VERSION) {
 		throw new Error(`multiview document recipe mismatch: ${manifest.generation_id}`);
@@ -313,7 +317,13 @@ export function getActiveGeneration(): EmbeddingGenerationManifest | null {
 	return manifest;
 }
 
-export async function createGeneration(generationId: string, sourceInventoryHash: string, dimension = 384, representationKind: "single" | "multiview" = "single"): Promise<EmbeddingGenerationManifest> {
+export async function createGeneration(
+	generationId: string,
+	sourceInventoryHash: string,
+	dimension = 384,
+	representationKind: "single" | "multiview" = "single",
+	evidencePolicy: EvidenceGatePolicySnapshot | null = null,
+): Promise<EmbeddingGenerationManifest> {
 	if (readGenerationManifest(generationId)) throw new Error(`generation already exists: ${generationId}`);
 	const tokenizer = await getTokenizerManifest();
 	const isMultiview = representationKind === "multiview";
@@ -326,7 +336,8 @@ export async function createGeneration(generationId: string, sourceInventoryHash
 		multiview_policy: isMultiview ? DEFAULT_MULTIVIEW_POLICY : null,
 		view_schema_version: isMultiview ? 1 : null,
 		aggregation_mode: isMultiview ? MULTIVIEW_AGGREGATION_MODE : "fragment-single-vector-v1",
-		evidence_policy_id: isMultiview ? MULTIVIEW_EVIDENCE_POLICY_ID : null,
+		evidence_policy_id: isMultiview ? evidencePolicy?.policy_id ?? MULTIVIEW_EVIDENCE_POLICY_ID : null,
+		evidence_policy: isMultiview ? evidencePolicy : null,
 		retrieval_epoch: isMultiview ? MULTIVIEW_RETRIEVAL_EPOCH : "fragment-single-vector-v1",
 		document_recipe_id: isMultiview ? MULTIVIEW_DOCUMENT_RECIPE_ID : DOCUMENT_RECIPE_ID,
 		document_recipe_version: isMultiview ? MULTIVIEW_DOCUMENT_RECIPE_VERSION : DOCUMENT_RECIPE_VERSION,
@@ -359,6 +370,7 @@ export async function createGeneration(generationId: string, sourceInventoryHash
 		view_schema_version: manifest.view_schema_version,
 		aggregation_mode: manifest.aggregation_mode,
 		evidence_policy_id: manifest.evidence_policy_id,
+		evidence_policy: manifest.evidence_policy,
 		retrieval_epoch: manifest.retrieval_epoch,
 		document_recipe_id: manifest.document_recipe_id,
 		document_recipe_version: manifest.document_recipe_version,

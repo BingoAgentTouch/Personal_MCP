@@ -1,5 +1,13 @@
 import * as fs from "node:fs";
-import type { EmbeddingLayer, FragmentWeightMeta, SearchResultItem, SearchResults } from "../types.js";
+import type {
+	EmbeddingLayer,
+	EmbeddingSourceSpan,
+	FragmentWeightMeta,
+	RawSimilarityMode,
+	SearchResultItem,
+	SearchResults,
+	SearchSnippetAnchor,
+} from "../types.js";
 import { listAllFragmentIds, getFragment, readMeta } from "../storage/fragments.js";
 import { getDailySummaryMeta } from "../storage/daily.js";
 import { getTopic } from "../storage/topics.js";
@@ -36,11 +44,19 @@ export function effectiveImportance(meta: Pick<FragmentWeightMeta, "importance" 
 	return Math.max(0, Math.min(1, Math.max(base, earned)));
 }
 
-export const MULTIVIEW_EVIDENCE_THRESHOLD = 0.554;
+/** A multiview evidence score affects ranking only through a validated policy snapshot. */
 export const MULTIVIEW_CANDIDATE_POOL_MULTIPLIER = 3;
 
 type LoadedVector = { vector: number[]; layer: EmbeddingLayer };
 type LoadedMultiview = { views: EffectiveMultiviewView[]; layer: EmbeddingLayer };
+
+interface RetrievalIdentity {
+	generationId: string | null;
+	representationIdentityHash: string | null;
+	retrievalEpoch: string | null;
+	evidencePolicyId: string | null;
+	evidencePolicy: import("../types.js").EvidenceGatePolicySnapshot | null;
+}
 
 async function loadAllEmbeddings(): Promise<{
 	vectors: Map<string, LoadedVector>;
@@ -98,6 +114,71 @@ interface ScoredFragment {
 	id: string;
 	rawSimilarity: number;
 	layer: EmbeddingLayer;
+	matchedView?: EffectiveMultiviewView;
+	rawSimilarityMode: RawSimilarityMode;
+}
+
+function chooseBestView(current: { score: number; view: EffectiveMultiviewView } | null, candidate: { score: number; view: EffectiveMultiviewView }): { score: number; view: EffectiveMultiviewView } {
+	if (!current || candidate.score > current.score || (candidate.score === current.score && candidate.view.view_id.localeCompare(current.view.view_id) < 0)) return candidate;
+	return current;
+}
+
+function queryNeedles(query: string): string[] {
+	const normalized = query.normalize("NFC").toLocaleLowerCase();
+	const needles = new Set<string>();
+	for (const token of normalized.match(/[\p{L}\p{N}_.:/\\-]+/gu) ?? []) {
+		if (token.length >= 2) needles.add(token);
+	}
+	const hanRuns = normalized.match(/[\p{Script=Han}]+/gu) ?? [];
+	for (const run of hanRuns) {
+		for (let index = 0; index < run.length - 1; index++) needles.add(run.slice(index, index + 2));
+		if (run.length === 1) needles.add(run);
+	}
+	return [...needles].sort((left, right) => right.length - left.length || left.localeCompare(right));
+}
+
+function lexicalSnippet(query: string, source: string): string | null {
+	const normalized = source.normalize("NFC");
+	const lower = normalized.toLocaleLowerCase();
+	const needle = queryNeedles(query).find((candidate) => lower.indexOf(candidate) >= 0);
+	if (!needle) return null;
+	const match = lower.indexOf(needle);
+	const points = Array.from(normalized);
+	const start = Math.max(0, Array.from(lower.slice(0, match)).length - 180);
+	const end = Math.min(points.length, start + 420);
+	return points.slice(start, end).join("").trim() || null;
+}
+
+function viewDisclosure(query: string, fragment: NonNullable<ReturnType<typeof getFragment>>, view?: EffectiveMultiviewView): {
+	matchedView: string | null;
+	matchedSourceRange: EmbeddingSourceSpan | null;
+	matchedSnippet: string | null;
+	snippetAnchor: SearchSnippetAnchor;
+} {
+	if (!view) return { matchedView: null, matchedSourceRange: null, matchedSnippet: null, snippetAnchor: null };
+	if (view.kind === "summary") {
+		return {
+			matchedView: view.view_id,
+			matchedSourceRange: null,
+			matchedSnippet: view.disclosure.snippet || null,
+			snippetAnchor: view.disclosure.snippet ? "view_fallback" : null,
+		};
+	}
+	const sourceRange = view.source_spans.find((span) => span.source_field === "turns_text") ?? null;
+	if (!sourceRange) return {
+		matchedView: view.view_id,
+		matchedSourceRange: null,
+		matchedSnippet: view.disclosure.snippet || null,
+		snippetAnchor: view.disclosure.snippet ? "view_fallback" : null,
+	};
+	const source = fragment.turns_text.slice(sourceRange.start_char, sourceRange.end_char);
+	const anchored = lexicalSnippet(query, source);
+	return {
+		matchedView: view.view_id,
+		matchedSourceRange: sourceRange,
+		matchedSnippet: anchored ?? view.disclosure.snippet ?? null,
+		snippetAnchor: anchored ? "lexical_overlap" : view.disclosure.snippet ? "view_fallback" : null,
+	};
 }
 
 function weightAndRerank(
@@ -105,6 +186,8 @@ function weightAndRerank(
 	topK: number,
 	baseGenerationId: string | null,
 	deltaId: string | null,
+	identity: RetrievalIdentity,
+	query: string,
 	poolMultiplier = 3,
 ): SearchResultItem[] {
 	scored.sort((a, b) => b.rawSimilarity - a.rawSimilarity || a.id.localeCompare(b.id));
@@ -117,7 +200,7 @@ function weightAndRerank(
 	weighted.sort((a, b) => b.final - a.final || b.rawSimilarity - a.rawSimilarity || a.id.localeCompare(b.id));
 	const results: SearchResultItem[] = [];
 	for (const w of weighted.slice(0, topK)) {
-		const item = buildResultItem(w.id, w.rawSimilarity, w.weight, w.layer, baseGenerationId, deltaId);
+		const item = buildResultItem(w, baseGenerationId, deltaId, identity, query);
 		if (item) results.push(item);
 	}
 	return results;
@@ -129,21 +212,32 @@ function aggregateMultiview(
 	topK: number,
 	baseGenerationId: string | null,
 	deltaId: string | null,
+	identity: RetrievalIdentity,
+	query: string,
 ): SearchResultItem[] {
 	const scored: ScoredFragment[] = [];
 	for (const [fragmentId, entry] of multiview) {
-		let summaryScore = 0;
-		let evidenceScore = 0;
+		let summary: { score: number; view: EffectiveMultiviewView } | null = null;
+		let evidence: { score: number; view: EffectiveMultiviewView } | null = null;
 		for (const view of entry.views) {
-			const score = cosine(queryVec, view.vector);
-			if (view.kind === "summary") summaryScore = Math.max(summaryScore, score);
-			else evidenceScore = Math.max(evidenceScore, score);
+			const candidate = { score: cosine(queryVec, view.vector), view };
+			if (view.kind === "summary") summary = chooseBestView(summary, candidate);
+			else evidence = chooseBestView(evidence, candidate);
 		}
-		const evidencePassed = evidenceScore >= MULTIVIEW_EVIDENCE_THRESHOLD;
-		const rawSimilarity = Math.max(summaryScore, evidencePassed ? evidenceScore : 0);
-		if (rawSimilarity > 0) scored.push({ id: fragmentId, rawSimilarity, layer: entry.layer });
+		const policy = identity.evidencePolicy;
+		const evidenceAllowed = Boolean(policy?.status === "validated" && policy.raw_similarity_mode === "fragment-max-view-v1");
+		const evidencePassed = Boolean(evidenceAllowed && evidence && evidence.score >= policy!.evidence_threshold);
+		const winner = evidencePassed && evidence && (!summary || evidence.score >= summary.score) ? evidence : summary;
+		if (!winner || winner.score <= 0) continue;
+		scored.push({
+			id: fragmentId,
+			rawSimilarity: winner.score,
+			layer: entry.layer,
+			matchedView: winner.view,
+			rawSimilarityMode: evidencePassed ? "fragment-max-view-v1" : "fragment-summary-only-shadow-v1",
+		});
 	}
-	return weightAndRerank(scored, topK, baseGenerationId, deltaId, MULTIVIEW_CANDIDATE_POOL_MULTIPLIER);
+	return weightAndRerank(scored, topK, baseGenerationId, deltaId, identity, query, MULTIVIEW_CANDIDATE_POOL_MULTIPLIER);
 }
 
 /** 回退模式搜索：Jaccard 相似度 + 第一期权重重排 */
@@ -156,41 +250,50 @@ function fallbackSearch(query: string, topK: number, agentId?: string): SearchRe
 		if (agentId && frag.agent_id !== agentId) continue;
 		const text = frag.task_desc + " " + frag.result_desc + " " + frag.turns_text.slice(0, 2000);
 		const score = jaccardSimilarity(query, text);
-		if (score > 0) scored.push({ id: fragId, rawSimilarity: score, layer: "base" });
+		if (score > 0) scored.push({ id: fragId, rawSimilarity: score, layer: "base", rawSimilarityMode: "fragment-fallback-jaccard-v1" });
 	}
-	return weightAndRerank(scored, topK, null, null);
+	return weightAndRerank(scored, topK, null, null, { generationId: null, representationIdentityHash: null, retrievalEpoch: null, evidencePolicyId: null, evidencePolicy: null }, query);
 }
 
 /** 构建单个结果条目（含层级回溯 + 三分数透出） */
 function buildResultItem(
-	fragId: string,
-	rawSimilarity: number,
-	weight: number,
-	layer: EmbeddingLayer,
+	scored: ScoredFragment & { weight: number },
 	baseGenerationId: string | null,
 	deltaId: string | null,
+	identity: RetrievalIdentity,
+	query: string,
 ): SearchResultItem | null {
-	const frag = getFragment(fragId);
+	const frag = getFragment(scored.id);
 	if (!frag) return null;
 	const daily = getDailySummaryMeta(frag.date);
 	const topic = frag.topic_name ? getTopic(frag.topic_name) : null;
 	let topicSummary: string | null = null;
 	if (topic) topicSummary = topic.entries.map((e) => `${e.date}：${e.summary}`).join("；");
+	const disclosure = viewDisclosure(query, frag, scored.matchedView);
 	const round4 = (n: number) => Math.round(n * 10000) / 10000;
 	return {
 		fragment_id: frag.fragment_id,
-		score: round4(rawSimilarity * weight),
-		raw_similarity: round4(rawSimilarity),
-		weight: round4(weight),
+		score: round4(scored.rawSimilarity * scored.weight),
+		raw_similarity: round4(scored.rawSimilarity),
+		weight: round4(scored.weight),
 		task_desc: frag.task_desc,
 		result_desc: frag.result_desc,
 		tags: frag.tags,
 		date: frag.date,
 		turns_range: `${frag.start_turn_id} ~ ${frag.end_turn_id}`,
 		agent_id: frag.agent_id,
-		embedding_layer: layer,
+		embedding_layer: scored.layer,
 		base_generation_id: baseGenerationId,
-		delta_id: layer === "delta" ? deltaId : null,
+		delta_id: scored.layer === "delta" ? deltaId : null,
+		matched_view: disclosure.matchedView,
+		matched_source_range: disclosure.matchedSourceRange,
+		matched_snippet: disclosure.matchedSnippet,
+		snippet_anchor: disclosure.snippetAnchor,
+		generation_id: identity.generationId,
+		representation_identity_hash: identity.representationIdentityHash,
+		retrieval_epoch: identity.retrievalEpoch,
+		raw_similarity_mode: scored.rawSimilarityMode,
+		evidence_policy_id: identity.evidencePolicyId,
 		hierarchy: {
 			daily_summary: daily?.summary_md ?? null,
 			topic_name: frag.topic_name,
@@ -204,6 +307,13 @@ export async function search(query: string, topK: number = 10, agentId?: string)
 	const filterAgentId = agentId;
 	if (isFallbackMode()) return { query, results: fallbackSearch(query, topK, filterAgentId) };
 	const active = getActiveGeneration();
+	const identity: RetrievalIdentity = {
+		generationId: active?.generation_id ?? null,
+		representationIdentityHash: active?.representation_identity_hash ?? null,
+		retrievalEpoch: active?.retrieval_epoch ?? null,
+		evidencePolicyId: active?.evidence_policy_id ?? null,
+		evidencePolicy: active?.evidence_policy ?? null,
+	};
 	const builtQuery = await buildQueryInput(query, active ?? undefined);
 	const queryVec = await encode(builtQuery.text);
 	if (queryVec.length === 0) return { query, results: fallbackSearch(query, topK, filterAgentId) };
@@ -214,7 +324,11 @@ export async function search(query: string, topK: number = 10, agentId?: string)
 			const frag = getFragment(fragId);
 			return Boolean(frag && frag.agent_id === filterAgentId);
 		}));
-		return { query, results: aggregateMultiview(filtered, queryVec, topK, allEmbeddings.baseGenerationId, allEmbeddings.deltaId), health: allEmbeddings.health };
+		return {
+			query,
+			results: aggregateMultiview(filtered, queryVec, topK, allEmbeddings.baseGenerationId, allEmbeddings.deltaId, identity, query),
+			health: allEmbeddings.health,
+		};
 	}
 	const scored: ScoredFragment[] = [];
 	for (const [fragId, entry] of allEmbeddings.vectors) {
@@ -223,7 +337,11 @@ export async function search(query: string, topK: number = 10, agentId?: string)
 			if (!frag || frag.agent_id !== filterAgentId) continue;
 		}
 		const sim = cosine(queryVec, entry.vector);
-		if (sim > 0) scored.push({ id: fragId, rawSimilarity: sim, layer: entry.layer });
+		if (sim > 0) scored.push({ id: fragId, rawSimilarity: sim, layer: entry.layer, rawSimilarityMode: "fragment-single-vector-v1" });
 	}
-	return { query, results: weightAndRerank(scored, topK, allEmbeddings.baseGenerationId, allEmbeddings.deltaId), health: allEmbeddings.health };
+	return {
+		query,
+		results: weightAndRerank(scored, topK, allEmbeddings.baseGenerationId, allEmbeddings.deltaId, identity, query),
+		health: allEmbeddings.health,
+	};
 }

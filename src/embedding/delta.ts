@@ -311,6 +311,7 @@ export function createDeltaManifest(active: EmbeddingGenerationManifest, activeM
 		view_schema_version: active.view_schema_version,
 		aggregation_mode: active.aggregation_mode,
 		evidence_policy_id: active.evidence_policy_id,
+		evidence_policy: active.evidence_policy,
 		retrieval_epoch: active.retrieval_epoch,
 		base_generation_id: active.generation_id,
 		base_manifest_hash: activeManifestHash,
@@ -359,7 +360,7 @@ export function currentDeltaCompatibility(): { active: EmbeddingGenerationManife
 	if (delta.representation_identity_hash !== active.representation_identity_hash) {
 		return { active, delta, compatible: false, reason: "delta representation identity mismatch" };
 	}
-	if (delta.representation_kind !== active.representation_kind || delta.document_recipe_id !== active.document_recipe_id || delta.document_recipe_version !== active.document_recipe_version || delta.document_policy_version !== active.document_policy_version || delta.aggregation_mode !== active.aggregation_mode || delta.evidence_policy_id !== active.evidence_policy_id || delta.retrieval_epoch !== active.retrieval_epoch) {
+	if (delta.representation_kind !== active.representation_kind || delta.document_recipe_id !== active.document_recipe_id || delta.document_recipe_version !== active.document_recipe_version || delta.document_policy_version !== active.document_policy_version || delta.aggregation_mode !== active.aggregation_mode || delta.evidence_policy_id !== active.evidence_policy_id || canonicalJson(delta.evidence_policy) !== canonicalJson(active.evidence_policy) || delta.retrieval_epoch !== active.retrieval_epoch) {
 		return { active, delta, compatible: false, reason: "delta representation schema mismatch" };
 	}
 	return { active, delta, compatible: true };

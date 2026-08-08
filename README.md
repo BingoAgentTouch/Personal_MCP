@@ -122,6 +122,28 @@ node <绝对路径>/migrate_embeddings.mjs switch --generation gen_YYYYMMDD_xxx
 
 当前简化模型下，服务器启动不会自动做 orphan reconcile 或后台修复；如果你怀疑 delta/base 状态不一致，直接走手动 rebuild + switch。
 
+## Multiview evidence calibration（离线维护者流程）
+
+多窗口 evidence gate 只允许使用通过 development 与 hold-out 验证的、版本化 fixture calibration artifact；不能把 `src/search/retriever.ts` 中的旧候选阈值当作 production policy。评测工具只读取 `bench/datasets/`，不会读取或修改任何 `memory/` root；它不切 active pointer，也不生成真实 generation。
+
+```bash
+node bench/run-multiview-eval.mjs calibrate \
+  --max-fpr 0 \
+  --min-evidence-recall 1 \
+  --output <candidate-report.json>
+
+# 从 candidate-report.json 提取 candidate_artifact 后，使用 untouched hold-out：
+node bench/run-multiview-eval.mjs validate \
+  --artifact <candidate-artifact.json> \
+  --output <holdout-report.json>
+
+node bench/run-multiview-eval.mjs evaluate \
+  --threshold <validated-threshold> \
+  --output <shadow-report.json>
+```
+
+`validate` 只有在 hold-out 满足冻结目标时才会输出 `validated` artifact；失败时报告 `no_go`，不得手动把 candidate 标为 validated。artifact 绑定 model/tokenizer、recipe、窗口策略、aggregation/raw-similarity mode、development/hold-out dataset hash 和 canonical artifact hash。真实库的 multiview build → validate → switch 仍需独立维护窗口授权；在 policy artifact、signals epoch 和 shadow 评测完成前不得切换。
+
 ## Compaction archive recovery（维护者手动流程）
 
 此流程只用于恢复一个 **C3-3B v2 compaction archive**：把 archive 中的 sealed delta 和记录的 base active pointer 原样恢复。它不是通用 JSON 修复、`migrate_embeddings.mjs` 的 rollback、orphan reconcile，也不是面向日常用户的操作。
