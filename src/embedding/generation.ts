@@ -285,6 +285,24 @@ export function readActivePointer(): ActiveEmbeddingPointer | null {
 	return JSON.parse(fs.readFileSync(ACTIVE_POINTER_PATH, "utf8")) as ActiveEmbeddingPointer;
 }
 
+export function activePointerSnapshotHash(pointer: ActiveEmbeddingPointer): string {
+	return hashBytes(canonicalJson(pointer));
+}
+
+export function assertActivePointerSnapshot(pointer: ActiveEmbeddingPointer): void {
+	if (pointer.pointer_schema_version !== 1) throw new Error(`unsupported active pointer schema: ${pointer.pointer_schema_version}`);
+	if (!/^[A-Za-z0-9._-]+$/.test(pointer.active_generation_id)) throw new Error(`invalid active pointer generation id: ${pointer.active_generation_id}`);
+	const manifest = readGenerationManifest(pointer.active_generation_id);
+	if (!manifest) throw new Error(`pointer generation missing: ${pointer.active_generation_id}`);
+	if (manifest.manifest_content_hash !== pointer.active_manifest_hash) throw new Error(`pointer manifest hash mismatch: ${pointer.active_generation_id}`);
+	if (manifest.state !== "ready" && manifest.state !== "active") throw new Error(`pointer generation is not activatable: ${pointer.active_generation_id}`);
+}
+
+export function serializeActivePointerSnapshot(pointer: ActiveEmbeddingPointer): string {
+	assertActivePointerSnapshot(pointer);
+	return `${JSON.stringify(pointer, null, 2)}\n`;
+}
+
 export function getActiveGeneration(): EmbeddingGenerationManifest | null {
 	const pointer = readActivePointer();
 	if (!pointer) return null;

@@ -48,10 +48,15 @@ describe("offline embedding compaction runner", () => {
 		const switchedCompact = run(compactRunner, "switch", "gen_compact_a");
 		assert.equal(switchedCompact.pointer.active_generation_id, "gen_compact_a");
 		assert.ok(switchedCompact.archived_delta_path);
+		const receipt = JSON.parse(fs.readFileSync(path.join(switchedCompact.archived_delta_path, "merge_receipt.json"), "utf8"));
+		assert.equal(receipt.receipt_schema_version, 2);
+		assert.ok(fs.existsSync(path.join(switchedCompact.archived_delta_path, "merge_contract.json")));
 		const archivedManifest = JSON.parse(fs.readFileSync(path.join(switchedCompact.archived_delta_path, "manifest.json"), "utf8"));
 		const freshManifest = JSON.parse(fs.readFileSync(path.join(memoryRoot, "embedding_delta", "manifest.json"), "utf8"));
 		assert.notEqual(freshManifest.delta_id, archivedManifest.delta_id);
 		assert.match(freshManifest.delta_id, /^delta_\d{8}_002$/);
+		assert.equal(freshManifest.state, "active");
+		assert.equal(freshManifest.base_generation_id, "gen_compact_a");
 		assert.equal(fs.existsSync(path.join(memoryRoot, ".embedding-compaction.lock")), false);
 	});
 });

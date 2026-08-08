@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type {
+	ActiveEmbeddingPointer,
 	EmbeddingDeltaManifest,
 	EmbeddingDeltaRecord,
 	EmbeddingDeltaRecordState,
@@ -18,6 +19,9 @@ import {
 	sourceContentHash,
 } from "./builder.js";
 import {
+	activePointerPath,
+	activePointerSnapshotHash,
+	assertActivePointerSnapshot,
 	generationVectorPath,
 	getActiveGeneration,
 	isMultiviewGeneration,
@@ -895,17 +899,13 @@ export interface CompactionMergeContractEntry {
 }
 
 export interface CompactionMergeContract {
-	contract_schema_version: 1;
+	contract_schema_version: 2;
 	base: {
 		generation_id: string;
 		manifest_content_hash: string;
 		source_inventory_hash: string;
 	};
-	active_pointer: {
-		pointer_schema_version: number;
-		active_generation_id: string;
-		active_manifest_hash: string;
-	};
+	active_pointer: ActiveEmbeddingPointer;
 	delta: {
 		delta_id: string;
 		manifest_content_hash: string;
@@ -947,11 +947,23 @@ export interface CompactionMergeContract {
 	contract_content_hash: string;
 }
 
+export interface CompactionArchiveFileDigest {
+	sha256: string;
+	size_bytes: number;
+}
+
 export interface CompactionArchiveMergeReceipt {
-	receipt_schema_version: 1;
+	receipt_schema_version: 2;
+	receipt_content_hash: string;
 	archive_delta_id: string;
 	archive_manifest_hash: string;
 	contract_hash: string;
+	contract_snapshot_path: "merge_contract.json";
+	archive_files: Record<string, CompactionArchiveFileDigest>;
+	pointer_snapshots: {
+		base: ActiveEmbeddingPointer;
+		target: ActiveEmbeddingPointer;
+	};
 	base: {
 		generation_id: string;
 		manifest_hash: string;
@@ -988,6 +1000,27 @@ export interface CompactionArchiveMergeReceipt {
 		tombstone_count: number;
 	};
 	archived_at: string;
+}
+
+export interface ArchiveVerificationResult {
+	valid: boolean;
+	archive_path: string;
+	receipt?: CompactionArchiveMergeReceipt;
+	failures: string[];
+}
+
+export interface RestoreArchivedDeltaResult {
+	restored: boolean;
+	idempotent: boolean;
+	transaction_path?: string;
+	recovery_failed?: boolean;
+}
+
+export interface RestoreRecoveryResult {
+	recovered: boolean;
+	cleaned_committed: boolean;
+	transaction_path?: string;
+	recovery_failed?: boolean;
 }
 
 function canonicalCompare(value: unknown): string {
@@ -1290,17 +1323,13 @@ export function planCompactionMergeContract(): CompactionMergeContract {
 	}
 	const sortedEntries = sortedCompactionEntries(entries);
 	const contract: Omit<CompactionMergeContract, "contract_content_hash"> = {
-		contract_schema_version: 1,
+		contract_schema_version: 2,
 		base: {
 			generation_id: active.generation_id,
 			manifest_content_hash: active.manifest_content_hash,
 			source_inventory_hash: active.source_inventory_hash,
 		},
-		active_pointer: {
-			pointer_schema_version: pointer.pointer_schema_version,
-			active_generation_id: pointer.active_generation_id,
-			active_manifest_hash: pointer.active_manifest_hash,
-		},
+		active_pointer: { ...pointer },
 		delta: {
 			delta_id: delta.delta_id,
 			manifest_content_hash: delta.manifest_content_hash,
@@ -1355,7 +1384,7 @@ export function setDeltaManifestState(state: EmbeddingDeltaManifest["state"]): E
 
 function activePointerHash(pointer: ReturnType<typeof readActivePointer>): string {
 	if (!pointer) throw new Error("active pointer missing for hash");
-	return hashBytes(canonicalJson(pointer));
+	return activePointerSnapshotHash(pointer);
 }
 
 function assertArchiveContractMatchesCurrentDelta(
@@ -1411,7 +1440,195 @@ function assertArchiveContractMatchesCurrentDelta(
 	}
 }
 
+function receiptContentHash(receipt: Omit<CompactionArchiveMergeReceipt, "receipt_content_hash">): string {
+	return hashBytes(canonicalJson(receipt));
+}
+
+function readJsonFile<T>(filePath: string, label: string): T {
+	try {
+		return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+	} catch (error) {
+		throw new Error(`${label} unreadable: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+function archiveRelativePath(relativePath: string): string {
+	const normalized = relativePath.split(path.sep).join("/");
+	if (!normalized || normalized.startsWith("/") || normalized.includes("..")) {
+		throw new Error(`unsafe archive path: ${relativePath}`);
+	}
+	return normalized;
+}
+
+function archivePayloadFiles(root: string): Record<string, CompactionArchiveFileDigest> {
+	const files: Record<string, CompactionArchiveFileDigest> = {};
+	const visit = (directory: string): void => {
+		for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+			const fullPath = path.join(directory, entry.name);
+			if (entry.isSymbolicLink()) throw new Error(`archive symlink is not allowed: ${fullPath}`);
+			if (entry.isDirectory()) {
+				visit(fullPath);
+				continue;
+			}
+			if (!entry.isFile()) throw new Error(`archive payload is not a regular file: ${fullPath}`);
+			const relativePath = archiveRelativePath(path.relative(root, fullPath));
+			if (relativePath === "merge_receipt.json") continue;
+			const bytes = fs.readFileSync(fullPath);
+			files[relativePath] = { sha256: hashBytes(bytes), size_bytes: bytes.length };
+		}
+	};
+	visit(root);
+	return files;
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+	return canonicalCompare(left) === canonicalCompare(right);
+}
+
+function archivedVectorPath(deltaRoot: string, fragmentId: string): string {
+	const [date, id] = parseFragmentId(fragmentId);
+	return path.join(deltaRoot, "vectors", date, `${id}.embedding`);
+}
+
+function archivedMultiviewSidecarPath(deltaRoot: string, fragmentId: string): string {
+	const [date, id] = parseFragmentId(fragmentId);
+	return path.join(deltaRoot, "vectors", date, id, "views.json");
+}
+
+function readMultiviewViewsAt(
+	deltaRoot: string,
+	fragmentId: string,
+	record: EmbeddingDeltaRecord | undefined,
+	dimension: number,
+): EffectiveMultiviewView[] | null {
+	if (!record || record.state !== "materialized" || !record.views?.length || record.views.filter((view) => view.kind === "summary").length !== 1) return null;
+	const summaryVector = readJsonVector(archivedVectorPath(deltaRoot, fragmentId));
+	if (!summaryVector || summaryVector.length !== dimension) return null;
+	const sidecarPath = archivedMultiviewSidecarPath(deltaRoot, fragmentId);
+	if (!fs.existsSync(sidecarPath)) return null;
+	try {
+		const sidecar = JSON.parse(fs.readFileSync(sidecarPath, "utf8")) as {
+			view_schema_version?: number;
+			fragment_id?: string;
+			source_content_hash?: string;
+			views?: Record<string, unknown>;
+		};
+		if (sidecar.view_schema_version !== 1 || sidecar.fragment_id !== fragmentId || sidecar.source_content_hash !== record.source_content_hash || !sidecar.views) return null;
+		const viewIds = record.views.map((view) => view.view_id).sort();
+		const sidecarIds = Object.keys(sidecar.views).sort();
+		if (JSON.stringify(viewIds) !== JSON.stringify(sidecarIds)) return null;
+		const result: EffectiveMultiviewView[] = [];
+		for (const view of record.views) {
+			const vector = sidecar.views[view.view_id];
+			if (!Array.isArray(vector) || vector.length !== dimension || vector.some((item) => typeof item !== "number" || !Number.isFinite(item))) return null;
+			const vectorHash = hashBytes(JSON.stringify(vector));
+			if (vectorHash !== view.vector_hash || view.vector_dimension !== dimension) return null;
+			if (view.kind === "summary" && (vectorHash !== record.vector_hash || JSON.stringify(vector) !== JSON.stringify(summaryVector))) return null;
+			result.push({ fragment_id: fragmentId, view_id: view.view_id, kind: view.kind, vector, input_hash: view.input_hash, vector_hash: view.vector_hash, vector_dimension: view.vector_dimension, source_spans: view.source_spans, disclosure: view.disclosure });
+		}
+		return result;
+	} catch {
+		return null;
+	}
+}
+
+function currentSourceInventoryHash(): string {
+	const rows = listAllFragmentIds().sort((left, right) => left.localeCompare(right)).map((fragmentId) => ({
+		fragment_id: fragmentId,
+		source_content_hash: liveSourceHashOrThrow(fragmentId),
+	}));
+	return hashBytes(canonicalJson(rows));
+}
+
+function validateArchiveContract(contract: CompactionMergeContract): void {
+	if (contract.contract_schema_version !== 2) throw new Error(`unsupported compaction contract schema: ${contract.contract_schema_version}`);
+	const { contract_content_hash: storedHash, ...contractBody } = contract;
+	if (storedHash !== compactionMergeContractHash(contractBody)) throw new Error("compaction contract content hash mismatch");
+	if (contract.fragment_counts.effective !== contract.entries.length || contract.fragment_counts.live !== contract.entries.length) {
+		throw new Error("compaction contract fragment counts mismatch");
+	}
+	if (contract.fragment_counts.base !== contract.entries.filter((entry) => entry.effective_layer === "base").length || contract.fragment_counts.delta !== contract.entries.filter((entry) => entry.effective_layer === "delta").length) {
+		throw new Error("compaction contract layer counts mismatch");
+	}
+	if (contract.source_inventory_hash !== effectiveSourceInventoryHash(contract.entries)) throw new Error("compaction contract source inventory hash mismatch");
+	if (contract.effective_entry_hash !== effectiveEntryHash(contract.entries)) throw new Error("compaction contract effective entry hash mismatch");
+	assertActivePointerSnapshot(contract.active_pointer);
+	if (contract.active_pointer.active_generation_id !== contract.base.generation_id || contract.active_pointer.active_manifest_hash !== contract.base.manifest_content_hash) {
+		throw new Error("compaction contract base pointer mismatch");
+	}
+}
+
+function validateArchivedDeltaPayload(archivePath: string, receipt: CompactionArchiveMergeReceipt, contract: CompactionMergeContract): EmbeddingDeltaManifest {
+	const manifest = readJsonFile<EmbeddingDeltaManifest>(path.join(archivePath, "manifest.json"), "archived delta manifest");
+	const { manifest_content_hash: storedHash, ...payload } = manifest;
+	if (storedHash !== manifestHash(payload)) throw new Error("archived delta manifest hash mismatch");
+	if (manifest.state !== "sealed") throw new Error(`archived delta is not sealed: ${manifest.state}`);
+	if (manifest.delta_id !== receipt.archive_delta_id || manifest.manifest_content_hash !== receipt.archive_manifest_hash) throw new Error("archived delta receipt identity mismatch");
+	if (manifest.delta_id !== contract.delta.delta_id || manifest.manifest_content_hash !== contract.delta.manifest_content_hash) throw new Error("archived delta contract identity mismatch");
+	if (manifest.base_generation_id !== contract.base.generation_id || manifest.base_manifest_hash !== contract.base.manifest_content_hash) throw new Error("archived delta base mismatch");
+	if (manifest.representation_identity_hash !== contract.representation.identity_hash || (manifest.representation_kind ?? "single") !== contract.representation.kind) throw new Error("archived delta representation mismatch");
+	const index = readJsonFile<Record<string, EmbeddingDeltaRecord>>(path.join(archivePath, "delta_index.json"), "archived delta index");
+	const counts = summarizeDeltaIndex(index);
+	if (manifest.record_count !== counts.record_count || manifest.materialized_count !== counts.materialized_count || manifest.failed_count !== counts.failed_count) throw new Error("archived delta counts mismatch");
+	for (const [fragmentId, record] of Object.entries(index)) {
+		if (record.fragment_id !== fragmentId || record.delta_id !== manifest.delta_id) throw new Error(`archived delta index identity mismatch: ${fragmentId}`);
+		if (record.representation_identity_hash !== manifest.representation_identity_hash) throw new Error(`archived delta representation mismatch: ${fragmentId}`);
+		if (record.state === "tombstone") continue;
+		if (record.state !== "materialized") throw new Error(`archived delta contains nonmaterialized record: ${fragmentId}`);
+		if (record.vector_dimension !== contract.representation.dimension || !record.vector_hash) throw new Error(`archived delta vector metadata mismatch: ${fragmentId}`);
+		if (manifest.representation_kind === "multiview") {
+			if (!record.view_set_hash || record.view_set_hash !== viewSetHash(record.views ?? [])) throw new Error(`archived multiview set hash mismatch: ${fragmentId}`);
+			if (!readMultiviewViewsAt(archivePath, fragmentId, record, contract.representation.dimension)) throw new Error(`archived multiview payload invalid: ${fragmentId}`);
+			continue;
+		}
+		const vector = readJsonVector(archivedVectorPath(archivePath, fragmentId));
+		if (!vector || vector.length !== contract.representation.dimension || hashBytes(JSON.stringify(vector)) !== record.vector_hash) throw new Error(`archived delta vector invalid: ${fragmentId}`);
+	}
+	return manifest;
+}
+
+export function verifyArchivedDelta(archivePath: string): ArchiveVerificationResult {
+	const resolvedArchive = path.resolve(archivePath);
+	const relativeArchive = path.relative(DELTA_ARCHIVE_BASE, resolvedArchive);
+	const failures: string[] = [];
+	try {
+		if (!relativeArchive || relativeArchive.startsWith("..") || path.isAbsolute(relativeArchive)) throw new Error("archive path is outside the archive root");
+		const receipt = readJsonFile<CompactionArchiveMergeReceipt>(path.join(resolvedArchive, "merge_receipt.json"), "archive receipt");
+		if (receipt.receipt_schema_version !== 2) throw new Error(`unsupported archive receipt schema: ${receipt.receipt_schema_version}`);
+		const { receipt_content_hash: _ignored, ...receiptBody } = receipt;
+		if (receipt.receipt_content_hash !== receiptContentHash(receiptBody)) throw new Error("archive receipt content hash mismatch");
+		const actualFiles = archivePayloadFiles(resolvedArchive);
+		if (!sameJson(actualFiles, receipt.archive_files)) throw new Error("archive payload file digest mismatch");
+		const contract = readJsonFile<CompactionMergeContract>(path.join(resolvedArchive, receipt.contract_snapshot_path), "archive contract snapshot");
+		validateArchiveContract(contract);
+		if (contract.contract_content_hash !== receipt.contract_hash) throw new Error("archive receipt contract hash mismatch");
+		if (!sameJson(contract.active_pointer, receipt.pointer_snapshots.base)) throw new Error("archive base pointer snapshot mismatch");
+		assertActivePointerSnapshot(receipt.pointer_snapshots.base);
+		assertActivePointerSnapshot(receipt.pointer_snapshots.target);
+		if (receipt.pointer_snapshots.target.active_generation_id !== receipt.target.generation_id || receipt.pointer_snapshots.target.active_manifest_hash !== receipt.target.manifest_hash || receipt.pointer_snapshots.target.previous_generation_id !== receipt.pointer_snapshots.base.active_generation_id) throw new Error("archive target pointer snapshot mismatch");
+		if (activePointerSnapshotHash(receipt.pointer_snapshots.target) !== receipt.target.pointer_hash) throw new Error("archive target pointer hash mismatch");
+		const baseManifest = readGenerationManifest(receipt.base.generation_id);
+		const targetManifest = readGenerationManifest(receipt.target.generation_id);
+		if (!baseManifest || baseManifest.manifest_content_hash !== receipt.base.manifest_hash || !targetManifest || targetManifest.manifest_content_hash !== receipt.target.manifest_hash) throw new Error("archive generation manifest mismatch");
+		if (baseManifest.representation_identity_hash !== contract.representation.identity_hash || targetManifest.representation_identity_hash !== contract.representation.identity_hash) throw new Error("archive generation representation mismatch");
+		if (receipt.base.generation_id !== contract.base.generation_id || receipt.base.manifest_hash !== contract.base.manifest_content_hash || receipt.merge.source_inventory_hash !== contract.source_inventory_hash || receipt.merge.effective_entry_hash !== contract.effective_entry_hash) throw new Error("archive receipt contract binding mismatch");
+		validateArchivedDeltaPayload(resolvedArchive, receipt, contract);
+		return { valid: true, archive_path: resolvedArchive, receipt, failures };
+	} catch (error) {
+		failures.push(error instanceof Error ? error.message : String(error));
+		return { valid: false, archive_path: resolvedArchive, failures };
+	}
+}
+
+export function assertArchivedDeltaRestorable(archivePath: string): CompactionArchiveMergeReceipt {
+	const verified = verifyArchivedDelta(archivePath);
+	if (!verified.valid || !verified.receipt) throw new Error(`archive verification failed: ${verified.failures.join("; ")}`);
+	return verified.receipt;
+}
+
 export function archiveCurrentDelta(targetGenerationId: string, contract?: CompactionMergeContract): string | null {
+	if (!contract) throw new Error("compaction merge contract is required for archiving");
+	validateArchiveContract(contract);
 	const manifest = readDeltaManifest();
 	if (!manifest) return null;
 	const activePointer = readActivePointer();
@@ -1419,73 +1636,315 @@ export function archiveCurrentDelta(targetGenerationId: string, contract?: Compa
 	const pointerHash = activePointerHash(activePointer);
 	const targetManifest = readGenerationManifest(targetGenerationId);
 	if (!targetManifest) throw new Error(`target generation manifest missing during delta archive: ${targetGenerationId}`);
-	if (activePointer.active_generation_id !== targetGenerationId) {
-		throw new Error(`target generation is not active during delta archive: ${activePointer.active_generation_id} != ${targetGenerationId}`);
-	}
-	if (targetManifest.manifest_content_hash !== activePointer.active_manifest_hash) {
-		throw new Error(`target pointer manifest hash mismatch during delta archive: ${targetManifest.manifest_content_hash} != ${activePointer.active_manifest_hash}`);
-	}
-	if (contract) assertArchiveContractMatchesCurrentDelta(manifest, contract, targetGenerationId);
+	assertArchiveContractMatchesCurrentDelta(manifest, contract, targetGenerationId);
+	if (activePointer.active_generation_id !== targetGenerationId || targetManifest.manifest_content_hash !== activePointer.active_manifest_hash) throw new Error("target pointer does not match archive target");
 	ensureDir(DELTA_ARCHIVE_BASE);
 	const archiveDir = path.join(DELTA_ARCHIVE_BASE, `${manifest.delta_id}-into-${targetGenerationId}`);
-	ensureDir(archiveDir);
-	for (const entry of ["manifest.json", "delta_index.json", "vectors"]) {
-		const source = path.join(DELTA_BASE, entry);
-		if (!fs.existsSync(source)) continue;
-		const destination = path.join(archiveDir, entry);
-		if (fs.statSync(source).isDirectory()) {
-			fs.cpSync(source, destination, { recursive: true });
-		} else {
-			fs.copyFileSync(source, destination);
+	const stagingDir = path.join(DELTA_ARCHIVE_BASE, `.${manifest.delta_id}-into-${targetGenerationId}.staging`);
+	if (fs.existsSync(archiveDir) || fs.existsSync(stagingDir)) throw new Error(`archive destination already exists: ${archiveDir}`);
+	try {
+		ensureDir(stagingDir);
+		for (const entry of ["manifest.json", "delta_index.json", "vectors"]) {
+			const source = path.join(DELTA_BASE, entry);
+			if (!fs.existsSync(source)) {
+				if (entry === "vectors") continue;
+				throw new Error(`required delta archive source missing: ${entry}`);
+			}
+			const destination = path.join(stagingDir, entry);
+			if (fs.statSync(source).isDirectory()) fs.cpSync(source, destination, { recursive: true });
+			else fs.copyFileSync(source, destination);
 		}
-	}
-	if (contract) {
-		const receipt: CompactionArchiveMergeReceipt = {
-			receipt_schema_version: 1,
+		atomicWrite(path.join(stagingDir, "merge_contract.json"), `${JSON.stringify(contract, null, 2)}\n`);
+		const receiptBody: Omit<CompactionArchiveMergeReceipt, "receipt_content_hash"> = {
+			receipt_schema_version: 2,
 			archive_delta_id: manifest.delta_id,
 			archive_manifest_hash: manifest.manifest_content_hash,
 			contract_hash: contract.contract_content_hash,
-			base: {
-				generation_id: contract.base.generation_id,
-				manifest_hash: contract.base.manifest_content_hash,
-				source_inventory_hash: contract.base.source_inventory_hash,
-			},
-			delta: {
-				delta_id: manifest.delta_id,
-				manifest_hash: manifest.manifest_content_hash,
-				state: "sealed",
-				base_generation_id: manifest.base_generation_id,
-				base_manifest_hash: manifest.base_manifest_hash,
-				pointer_generation_id: activePointer.previous_generation_id ?? contract.base.generation_id,
-				pointer_manifest_hash: contract.delta.base_manifest_hash,
-				record_count: manifest.record_count,
-				materialized_count: manifest.materialized_count,
-				failed_count: manifest.failed_count,
-			},
-			target: {
-				generation_id: targetManifest.generation_id,
-				manifest_hash: targetManifest.manifest_content_hash,
-				pointer_manifest_hash: activePointer.active_manifest_hash,
-				pointer_hash: pointerHash,
-				source_inventory_hash: targetManifest.source_inventory_hash,
-				expected_count: targetManifest.expected_count,
-				materialized_count: targetManifest.materialized_count,
-			},
-			merge: {
-				source_inventory_hash: contract.source_inventory_hash,
-				effective_entry_hash: contract.effective_entry_hash,
-				live_fragment_count: contract.fragment_counts.live,
-				effective_fragment_count: contract.fragment_counts.effective,
-				base_fragment_count: contract.fragment_counts.base,
-				delta_fragment_count: contract.fragment_counts.delta,
-				tombstone_count: contract.fragment_counts.tombstone,
-			},
+			contract_snapshot_path: "merge_contract.json",
+			archive_files: archivePayloadFiles(stagingDir),
+			pointer_snapshots: { base: { ...contract.active_pointer }, target: { ...activePointer } },
+			base: { generation_id: contract.base.generation_id, manifest_hash: contract.base.manifest_content_hash, source_inventory_hash: contract.base.source_inventory_hash },
+			delta: { delta_id: manifest.delta_id, manifest_hash: manifest.manifest_content_hash, state: "sealed", base_generation_id: manifest.base_generation_id, base_manifest_hash: manifest.base_manifest_hash, pointer_generation_id: contract.active_pointer.active_generation_id, pointer_manifest_hash: contract.active_pointer.active_manifest_hash, record_count: manifest.record_count, materialized_count: manifest.materialized_count, failed_count: manifest.failed_count },
+			target: { generation_id: targetManifest.generation_id, manifest_hash: targetManifest.manifest_content_hash, pointer_manifest_hash: activePointer.active_manifest_hash, pointer_hash: pointerHash, source_inventory_hash: targetManifest.source_inventory_hash, expected_count: targetManifest.expected_count, materialized_count: targetManifest.materialized_count },
+			merge: { source_inventory_hash: contract.source_inventory_hash, effective_entry_hash: contract.effective_entry_hash, live_fragment_count: contract.fragment_counts.live, effective_fragment_count: contract.fragment_counts.effective, base_fragment_count: contract.fragment_counts.base, delta_fragment_count: contract.fragment_counts.delta, tombstone_count: contract.fragment_counts.tombstone },
 			archived_at: nowIso(),
 		};
-		atomicWrite(path.join(archiveDir, "merge_receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+		const receipt: CompactionArchiveMergeReceipt = { ...receiptBody, receipt_content_hash: receiptContentHash(receiptBody) };
+		atomicWrite(path.join(stagingDir, "merge_receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+		const staged = verifyArchivedDelta(stagingDir);
+		if (!staged.valid) throw new Error(`staged archive verification failed: ${staged.failures.join("; ")}`);
+		fs.renameSync(stagingDir, archiveDir);
+		const archived = verifyArchivedDelta(archiveDir);
+		if (!archived.valid) throw new Error(`published archive verification failed: ${archived.failures.join("; ")}`);
+		writeDeltaManifest({ ...manifest, state: "merged" });
+		return archiveDir;
+	} catch (error) {
+		if (fs.existsSync(stagingDir)) fs.rmSync(stagingDir, { recursive: true, force: true });
+		throw error;
 	}
-	writeDeltaManifest({ ...manifest, state: "merged" });
-	return archiveDir;
+}
+
+export interface RestoreFileOps {
+	mkdirSync: (filePath: string, options?: { recursive?: boolean }) => void;
+	writeFileSync: (filePath: string, content: string, encoding?: BufferEncoding) => void;
+	readFileSync: (filePath: string, encoding?: BufferEncoding) => string | Buffer;
+	copyFileSync: (source: string, destination: string) => void;
+	cpSync: (source: string, destination: string, options: { recursive: true }) => void;
+	renameSync: (source: string, destination: string) => void;
+	unlinkSync: (filePath: string) => void;
+	existsSync: (filePath: string) => boolean;
+	rmSync: (filePath: string, options: { recursive?: boolean; force?: boolean }) => void;
+}
+
+const defaultRestoreFileOps: RestoreFileOps = {
+	mkdirSync: (filePath, options) => fs.mkdirSync(filePath, options),
+	writeFileSync: (filePath, content, encoding) => fs.writeFileSync(filePath, content, encoding),
+	readFileSync: (filePath, encoding) => fs.readFileSync(filePath, encoding),
+	copyFileSync: (source, destination) => fs.copyFileSync(source, destination),
+	cpSync: (source, destination, options) => fs.cpSync(source, destination, options),
+	renameSync: (source, destination) => fs.renameSync(source, destination),
+	unlinkSync: (filePath) => fs.unlinkSync(filePath),
+	existsSync: (filePath) => fs.existsSync(filePath),
+	rmSync: (filePath, options) => fs.rmSync(filePath, options),
+};
+
+type RestorePhase = "prepared" | "delta_committing" | "pointer_committing" | "committed" | "rollback_failed";
+
+interface RestoreTransactionManifest {
+	transaction_schema_version: 1;
+	operation: "restore_archived_delta";
+	archive_path: string;
+	receipt_content_hash: string;
+	phase: RestorePhase;
+	base_pointer: ActiveEmbeddingPointer;
+	target_pointer: ActiveEmbeddingPointer;
+	created_lock: boolean;
+}
+
+function restoreTransactionPath(operationId: string): string {
+	return deltaTransactionRoot(`restore-${operationId}`);
+}
+
+function restoreTransactionManifestPath(transactionPath: string): string {
+	return path.join(transactionPath, "transaction.json");
+}
+
+function restoreTransactionId(): string {
+	return `${Date.now()}-${process.pid}`;
+}
+
+function writeRestoreTransaction(transactionPath: string, transaction: RestoreTransactionManifest, ops: RestoreFileOps): void {
+	ops.mkdirSync(transactionPath, { recursive: true });
+	const temporary = `${restoreTransactionManifestPath(transactionPath)}.tmp`;
+	ops.writeFileSync(temporary, `${JSON.stringify(transaction, null, 2)}\n`, "utf8");
+	ops.renameSync(temporary, restoreTransactionManifestPath(transactionPath));
+}
+
+function readRestoreTransaction(transactionPath: string): RestoreTransactionManifest {
+	return readJsonFile<RestoreTransactionManifest>(restoreTransactionManifestPath(transactionPath), "restore transaction");
+}
+
+function restorePayloadPaths(root: string): Array<{ name: "manifest.json" | "delta_index.json" | "vectors"; path: string }> {
+	return [
+		{ name: "manifest.json", path: path.join(root, "manifest.json") },
+		{ name: "delta_index.json", path: path.join(root, "delta_index.json") },
+		{ name: "vectors", path: path.join(root, "vectors") },
+	];
+}
+
+function copyPath(source: string, destination: string, ops: RestoreFileOps): void {
+	const stat = fs.statSync(source);
+	ops.mkdirSync(path.dirname(destination), { recursive: true });
+	if (stat.isDirectory()) ops.cpSync(source, destination, { recursive: true });
+	else ops.copyFileSync(source, destination);
+}
+
+function removePath(target: string, ops: RestoreFileOps): void {
+	if (!ops.existsSync(target)) return;
+	const stat = fs.statSync(target);
+	if (stat.isDirectory()) ops.rmSync(target, { recursive: true, force: true });
+	else ops.unlinkSync(target);
+}
+
+function copyRestorePayload(sourceRoot: string, destinationRoot: string, required: boolean, ops: RestoreFileOps): void {
+	for (const entry of restorePayloadPaths(sourceRoot)) {
+		if (!ops.existsSync(entry.path)) {
+			if (required || entry.name !== "vectors") throw new Error(`restore payload missing: ${entry.name}`);
+			continue;
+		}
+		copyPath(entry.path, path.join(destinationRoot, entry.name), ops);
+	}
+}
+
+function replaceRestorePayload(sourceRoot: string, ops: RestoreFileOps): void {
+	for (const entry of restorePayloadPaths(DELTA_BASE)) removePath(entry.path, ops);
+	copyRestorePayload(sourceRoot, DELTA_BASE, true, ops);
+}
+
+function deltaPayloadMatchesArchive(archivePath: string): boolean {
+	try {
+		const archiveFiles = archivePayloadFiles(archivePath);
+		const liveFiles: Record<string, CompactionArchiveFileDigest> = {};
+		for (const [relativePath, digest] of Object.entries(archiveFiles)) {
+			if (relativePath === "merge_contract.json") continue;
+			const livePath = path.join(DELTA_BASE, ...relativePath.split("/"));
+			if (!fs.existsSync(livePath)) return false;
+			const bytes = fs.readFileSync(livePath);
+			if (bytes.length !== digest.size_bytes || hashBytes(bytes) !== digest.sha256) return false;
+			liveFiles[relativePath] = digest;
+		}
+		const manifest = readDeltaManifest();
+		return Boolean(manifest && liveFiles["manifest.json"] && liveFiles["delta_index.json"]);
+	} catch {
+		return false;
+	}
+}
+
+function samePointer(left: ActiveEmbeddingPointer | null, right: ActiveEmbeddingPointer): boolean {
+	return left !== null && sameJson(left, right);
+}
+
+function assertRestoreLiveState(receipt: CompactionArchiveMergeReceipt, archivePath: string): "restore" | "idempotent" {
+	if (currentSourceInventoryHash() !== receipt.merge.source_inventory_hash) throw new Error("live source inventory drifted since compaction");
+	const currentPointer = readActivePointer();
+	if (samePointer(currentPointer, receipt.pointer_snapshots.base)) {
+		if (!deltaPayloadMatchesArchive(archivePath)) throw new Error("base pointer is active but live delta does not match archive");
+		return "idempotent";
+	}
+	if (!samePointer(currentPointer, receipt.pointer_snapshots.target)) throw new Error("current active pointer does not match archive target");
+	const liveDelta = readDeltaManifest();
+	const liveIndex = readDeltaIndex();
+	if (!liveDelta) throw new Error("live target delta is missing");
+	if (liveDelta.state === "active" && Object.keys(liveIndex).length === 0 && liveDelta.base_generation_id === receipt.target.generation_id && liveDelta.base_manifest_hash === receipt.target.manifest_hash) return "restore";
+	if (liveDelta.state === "merged" && liveDelta.delta_id === receipt.archive_delta_id && Object.keys(liveIndex).length === receipt.delta.record_count) return "restore";
+	throw new Error("live target delta is not an empty fresh delta or archive-complete state");
+}
+
+function listRestoreTransactions(): string[] {
+	if (!fs.existsSync(DELTA_TRANSACTIONS_BASE)) return [];
+	return fs.readdirSync(DELTA_TRANSACTIONS_BASE, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory() && entry.name.startsWith("restore-"))
+		.map((entry) => path.join(DELTA_TRANSACTIONS_BASE, entry.name));
+}
+
+function rollbackRestoreTransaction(transactionPath: string, transaction: RestoreTransactionManifest, ops: RestoreFileOps): void {
+	const backupRoot = path.join(transactionPath, "backup");
+	replaceRestorePayload(path.join(backupRoot, "delta"), ops);
+	const pointerBackup = path.join(backupRoot, "embedding_active.json");
+	if (ops.existsSync(pointerBackup)) {
+		removePath(activePointerPath(), ops);
+		copyPath(pointerBackup, activePointerPath(), ops);
+	} else {
+		removePath(activePointerPath(), ops);
+	}
+	if (transaction.created_lock) removeCompactionLock();
+}
+
+function assertRestoredLiveState(receipt: CompactionArchiveMergeReceipt, archivePath: string): void {
+	if (!samePointer(readActivePointer(), receipt.pointer_snapshots.base)) throw new Error("restored pointer does not match archive base pointer");
+	if (!deltaPayloadMatchesArchive(archivePath)) throw new Error("restored delta payload does not match archive");
+	const manifest = readDeltaManifest();
+	if (!manifest || manifest.state !== "sealed" || manifest.delta_id !== receipt.archive_delta_id) throw new Error("restored delta manifest is not the archived sealed delta");
+	const compatibility = currentDeltaCompatibility();
+	if (!compatibility.compatible) throw new Error(compatibility.reason ?? "restored delta is incompatible with base generation");
+}
+
+export function restoreArchivedDelta(archivePath: string, ops: RestoreFileOps = defaultRestoreFileOps): RestoreArchivedDeltaResult {
+	if (listRestoreTransactions().length > 0) throw new Error("restore transaction already exists; recover it before starting another restore");
+	const receipt = assertArchivedDeltaRestorable(archivePath);
+	const mode = assertRestoreLiveState(receipt, archivePath);
+	if (mode === "idempotent") return { restored: false, idempotent: true };
+	let createdLock = false;
+	if (!getCompactionLock().locked) {
+		createCompactionLock("restore_archived_delta");
+		createdLock = true;
+	}
+	const transactionPath = restoreTransactionPath(restoreTransactionId());
+	const transaction: RestoreTransactionManifest = {
+		transaction_schema_version: 1,
+		operation: "restore_archived_delta",
+		archive_path: path.resolve(archivePath),
+		receipt_content_hash: receipt.receipt_content_hash,
+		phase: "prepared",
+		base_pointer: receipt.pointer_snapshots.base,
+		target_pointer: receipt.pointer_snapshots.target,
+		created_lock: createdLock,
+	};
+	try {
+		const stagedRoot = path.join(transactionPath, "staged", "delta");
+		const backupRoot = path.join(transactionPath, "backup");
+		copyRestorePayload(archivePath, stagedRoot, true, ops);
+		copyRestorePayload(DELTA_BASE, path.join(backupRoot, "delta"), true, ops);
+		if (ops.existsSync(activePointerPath())) copyPath(activePointerPath(), path.join(backupRoot, "embedding_active.json"), ops);
+		writeRestoreTransaction(transactionPath, transaction, ops);
+		transaction.phase = "delta_committing";
+		writeRestoreTransaction(transactionPath, transaction, ops);
+		replaceRestorePayload(stagedRoot, ops);
+		transaction.phase = "pointer_committing";
+		writeRestoreTransaction(transactionPath, transaction, ops);
+		const stagedPointer = path.join(transactionPath, "staged", "embedding_active.json");
+		ops.writeFileSync(stagedPointer, `${JSON.stringify(receipt.pointer_snapshots.base, null, 2)}\n`, "utf8");
+		removePath(activePointerPath(), ops);
+		ops.renameSync(stagedPointer, activePointerPath());
+		transaction.phase = "committed";
+		writeRestoreTransaction(transactionPath, transaction, ops);
+		assertRestoredLiveState(receipt, archivePath);
+		ops.rmSync(transactionPath, { recursive: true, force: true });
+		if (createdLock) removeCompactionLock();
+		return { restored: true, idempotent: false };
+	} catch (error) {
+		try {
+			if (ops.existsSync(transactionPath)) {
+				rollbackRestoreTransaction(transactionPath, transaction, ops);
+				ops.rmSync(transactionPath, { recursive: true, force: true });
+			} else if (createdLock) {
+				removeCompactionLock();
+			}
+		} catch (rollbackError) {
+			try {
+				transaction.phase = "rollback_failed";
+				writeRestoreTransaction(transactionPath, transaction, ops);
+			} catch {
+				// Preserve any partial transaction evidence if the marker cannot be updated.
+			}
+			return { restored: false, idempotent: false, transaction_path: transactionPath, recovery_failed: true };
+		}
+		throw error;
+	}
+}
+
+export function recoverDeltaRestoreTransaction(ops: RestoreFileOps = defaultRestoreFileOps): RestoreRecoveryResult {
+	const transactions = listRestoreTransactions();
+	if (!transactions.length) return { recovered: false, cleaned_committed: false };
+	if (transactions.length > 1) throw new Error("multiple restore transactions require manual inspection");
+	const transactionPath = transactions[0];
+	const transaction = readRestoreTransaction(transactionPath);
+	if (transaction.operation !== "restore_archived_delta" || transaction.transaction_schema_version !== 1) throw new Error("unsupported restore transaction");
+	const receipt = assertArchivedDeltaRestorable(transaction.archive_path);
+	if (receipt.receipt_content_hash !== transaction.receipt_content_hash) throw new Error("restore transaction receipt hash mismatch");
+	if (transaction.phase === "committed") {
+		try {
+			assertRestoredLiveState(receipt, transaction.archive_path);
+			ops.rmSync(transactionPath, { recursive: true, force: true });
+			if (transaction.created_lock) removeCompactionLock();
+			return { recovered: false, cleaned_committed: true };
+		} catch (error) {
+			throw new Error(`committed restore transaction is not valid: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	try {
+		rollbackRestoreTransaction(transactionPath, transaction, ops);
+		ops.rmSync(transactionPath, { recursive: true, force: true });
+		return { recovered: true, cleaned_committed: false };
+	} catch (error) {
+		try {
+			transaction.phase = "rollback_failed";
+			writeRestoreTransaction(transactionPath, transaction, ops);
+		} catch {
+			// Preserve the original transaction residue if its marker cannot be updated.
+		}
+		return { recovered: false, cleaned_committed: false, transaction_path: transactionPath, recovery_failed: true };
+	}
 }
 
 export function resetDeltaForActiveGeneration(): EmbeddingDeltaManifest {

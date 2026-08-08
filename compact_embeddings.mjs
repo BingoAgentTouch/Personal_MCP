@@ -62,6 +62,7 @@ function loadSealedContract() {
 	const contract = readJsonFile(compactionContractPath);
 	if (!contract) throw new Error("compaction merge contract missing");
 	if (contract.contract_content_hash !== contractBodyHash(contract)) throw new Error("compaction merge contract hash mismatch");
+	if (contract.contract_schema_version !== 2) throw new Error(`unsupported compaction merge contract schema: ${contract.contract_schema_version}`);
 	if (contract.delta?.state !== "sealed") throw new Error(`compaction merge contract is not sealed: ${contract.delta?.state ?? "missing"}`);
 	return contract;
 }
@@ -110,6 +111,9 @@ function assertSnapshotContractBinding(snapshot, contract) {
 	}
 	if (binding.active_manifest_hash && binding.active_manifest_hash !== contract.active_pointer.active_manifest_hash) {
 		throw new Error(`compaction contract active manifest drifted: ${binding.active_manifest_hash} != ${contract.active_pointer.active_manifest_hash}`);
+	}
+	if (binding.active_previous_generation_id !== undefined && binding.active_previous_generation_id !== contract.active_pointer.previous_generation_id) {
+		throw new Error(`compaction contract previous generation drifted: ${binding.active_previous_generation_id} != ${contract.active_pointer.previous_generation_id}`);
 	}
 	if (binding.effective_entry_hash && binding.effective_entry_hash !== contract.effective_entry_hash) {
 		throw new Error(`compaction contract effective entry drifted: ${binding.effective_entry_hash} != ${contract.effective_entry_hash}`);
@@ -254,6 +258,7 @@ if (command === "build") {
 			delta_manifest_hash: contract.delta.manifest_content_hash,
 			active_generation_id: contract.active_pointer.active_generation_id,
 			active_manifest_hash: contract.active_pointer.active_manifest_hash,
+			active_previous_generation_id: contract.active_pointer.previous_generation_id,
 			effective_entry_hash: contract.effective_entry_hash,
 		},
 	};
@@ -322,7 +327,10 @@ if (command === "switch") {
 		throw new Error("activated pointer does not match validated generation snapshot");
 	}
 	const archivePath = delta.archiveCurrentDelta(generationId, planned);
+	if (!archivePath || !delta.verifyArchivedDelta(archivePath).valid) throw new Error("published compaction archive verification failed");
 	const newDelta = delta.resetDeltaForActiveGeneration();
+	const compatibility = delta.currentDeltaCompatibility();
+	if (!compatibility.compatible || newDelta.state !== "active") throw new Error(compatibility.reason ?? "fresh compaction delta is incompatible");
 	delta.removeCompactionLock();
 	report({
 		command,
