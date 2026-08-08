@@ -16,7 +16,6 @@ import {
 	MULTIVIEW_AGGREGATION_MODE,
 	MULTIVIEW_DOCUMENT_RECIPE_ID,
 	MULTIVIEW_DOCUMENT_RECIPE_VERSION,
-	MULTIVIEW_EVIDENCE_POLICY_ID,
 	MULTIVIEW_POLICY_VERSION,
 	MULTIVIEW_RETRIEVAL_EPOCH,
 	DEFAULT_MULTIVIEW_POLICY,
@@ -26,6 +25,7 @@ import {
 	QUERY_RECIPE_VERSION,
 	getTokenizerManifest,
 } from "./builder.js";
+import { assertValidatedEvidencePolicy, currentEvidencePolicyScope } from "./evidence-policy.js";
 
 const MEMORY_BASE = path.resolve("memory");
 const GENERATIONS_BASE = path.join(MEMORY_BASE, "embedding_generations");
@@ -215,22 +215,30 @@ function coverageEquals(left: number, right: number): boolean {
 	return Math.abs(left - right) <= Number.EPSILON;
 }
 
-function validateGenerationMultiviewManifest(manifest: EmbeddingGenerationManifest): void {
-	if (!isMultiviewGeneration(manifest)) {
-		throw new Error(`multiview generation write requires multiview generation: ${manifest.generation_id}`);
-	}
+export function assertMultiviewGenerationPolicy(manifest: EmbeddingGenerationManifest): void {
+	if (!isMultiviewGeneration(manifest)) return;
 	if (manifest.view_schema_version !== 1) throw new Error(`multiview view schema mismatch: ${manifest.generation_id}`);
 	if (manifest.document_policy_version !== MULTIVIEW_POLICY_VERSION) throw new Error(`multiview document policy mismatch: ${manifest.generation_id}`);
 	if (!manifest.multiview_policy) throw new Error(`multiview policy missing: ${manifest.generation_id}`);
 	if (manifest.aggregation_mode !== MULTIVIEW_AGGREGATION_MODE) throw new Error(`multiview aggregation mismatch: ${manifest.generation_id}`);
-	if (!manifest.evidence_policy_id) throw new Error(`multiview evidence policy missing: ${manifest.generation_id}`);
-	if (manifest.evidence_policy && (manifest.evidence_policy.status !== "validated" || manifest.evidence_policy.policy_id !== manifest.evidence_policy_id || manifest.evidence_policy.raw_similarity_mode !== MULTIVIEW_AGGREGATION_MODE)) {
-		throw new Error(`multiview evidence policy snapshot mismatch: ${manifest.generation_id}`);
-	}
 	if (manifest.retrieval_epoch !== MULTIVIEW_RETRIEVAL_EPOCH) throw new Error(`multiview retrieval epoch mismatch: ${manifest.generation_id}`);
 	if (manifest.document_recipe_id !== MULTIVIEW_DOCUMENT_RECIPE_ID || manifest.document_recipe_version !== MULTIVIEW_DOCUMENT_RECIPE_VERSION) {
 		throw new Error(`multiview document recipe mismatch: ${manifest.generation_id}`);
 	}
+	assertValidatedEvidencePolicy(
+		manifest.evidence_policy,
+		currentEvidencePolicyScope(manifest.embedding_model_id, manifest.tokenizer_id),
+	);
+	if (manifest.evidence_policy_id !== manifest.evidence_policy.policy_id) {
+		throw new Error(`multiview evidence policy snapshot mismatch: ${manifest.generation_id}`);
+	}
+}
+
+function validateGenerationMultiviewManifest(manifest: EmbeddingGenerationManifest): void {
+	if (!isMultiviewGeneration(manifest)) {
+		throw new Error(`multiview generation write requires multiview generation: ${manifest.generation_id}`);
+	}
+	assertMultiviewGenerationPolicy(manifest);
 }
 
 export interface MaterializedGenerationView {
@@ -320,6 +328,19 @@ export function getActiveGeneration(): EmbeddingGenerationManifest | null {
 export async function createGeneration(
 	generationId: string,
 	sourceInventoryHash: string,
+	dimension?: number,
+	representationKind?: "single",
+): Promise<EmbeddingGenerationManifest>;
+export async function createGeneration(
+	generationId: string,
+	sourceInventoryHash: string,
+	dimension: number | undefined,
+	representationKind: "multiview",
+	evidencePolicy: EvidenceGatePolicySnapshot,
+): Promise<EmbeddingGenerationManifest>;
+export async function createGeneration(
+	generationId: string,
+	sourceInventoryHash: string,
 	dimension = 384,
 	representationKind: "single" | "multiview" = "single",
 	evidencePolicy: EvidenceGatePolicySnapshot | null = null,
@@ -327,6 +348,9 @@ export async function createGeneration(
 	if (readGenerationManifest(generationId)) throw new Error(`generation already exists: ${generationId}`);
 	const tokenizer = await getTokenizerManifest();
 	const isMultiview = representationKind === "multiview";
+	if (isMultiview) {
+		assertValidatedEvidencePolicy(evidencePolicy, currentEvidencePolicyScope(MODEL_ID, tokenizer.tokenizer_id));
+	}
 	const manifest: EmbeddingGenerationManifest = {
 		manifest_schema_version: 2,
 		generation_id: generationId,
@@ -336,8 +360,8 @@ export async function createGeneration(
 		multiview_policy: isMultiview ? DEFAULT_MULTIVIEW_POLICY : null,
 		view_schema_version: isMultiview ? 1 : null,
 		aggregation_mode: isMultiview ? MULTIVIEW_AGGREGATION_MODE : "fragment-single-vector-v1",
-		evidence_policy_id: isMultiview ? evidencePolicy?.policy_id ?? MULTIVIEW_EVIDENCE_POLICY_ID : null,
-		evidence_policy: isMultiview ? evidencePolicy : null,
+		evidence_policy_id: isMultiview ? evidencePolicy!.policy_id : null,
+		evidence_policy: isMultiview ? evidencePolicy! : null,
 		retrieval_epoch: isMultiview ? MULTIVIEW_RETRIEVAL_EPOCH : "fragment-single-vector-v1",
 		document_recipe_id: isMultiview ? MULTIVIEW_DOCUMENT_RECIPE_ID : DOCUMENT_RECIPE_ID,
 		document_recipe_version: isMultiview ? MULTIVIEW_DOCUMENT_RECIPE_VERSION : DOCUMENT_RECIPE_VERSION,
@@ -703,6 +727,7 @@ export function assertGenerationReadyForActivation(
 	manifest: EmbeddingGenerationManifest,
 	validation: GenerationValidationResult,
 ): void {
+	if (isMultiviewGeneration(manifest)) assertMultiviewGenerationPolicy(manifest);
 	if (manifest.state !== "ready" && manifest.state !== "active") {
 		throw new Error(`generation is not ready for activation: ${manifest.generation_id} state=${manifest.state}`);
 	}
@@ -738,6 +763,7 @@ export function setGenerationExpectedCount(generationId: string, expectedCount: 
 export function finalizeGeneration(generationId: string): EmbeddingGenerationManifest {
 	const manifest = readGenerationManifest(generationId);
 	if (!manifest) throw new Error(`generation not found: ${generationId}`);
+	if (isMultiviewGeneration(manifest)) assertMultiviewGenerationPolicy(manifest);
 	const index = readGenerationIndex(generationId);
 	const records = Object.values(index);
 	const failed = records.filter((record) => record.state === "failed").length;
@@ -760,6 +786,7 @@ export function activateGeneration(generationId: string): ActiveEmbeddingPointer
 	if (!manifest || (manifest.state !== "ready" && manifest.state !== "active")) {
 		throw new Error(`generation is not activatable: ${generationId}`);
 	}
+	if (isMultiviewGeneration(manifest)) assertMultiviewGenerationPolicy(manifest);
 	if (manifest.failed_count !== 0) {
 		throw new Error(`generation has failed records and cannot be activated: ${generationId}`);
 	}

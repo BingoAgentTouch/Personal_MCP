@@ -57,6 +57,49 @@ export function evidencePolicyScopeHash(scope: EvidencePolicyScope): string {
 	return sha256(canonicalJson(scope));
 }
 
+function isSha256(value: unknown): value is string {
+	return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
+}
+
+export function assertValidatedEvidencePolicy(
+	policy: EvidenceGatePolicySnapshot | null | undefined,
+	expectedScope: EvidencePolicyScope,
+): asserts policy is EvidenceGatePolicySnapshot {
+	if (!policy || policy.policy_schema_version !== 1 || policy.status !== "validated") {
+		throw new Error("validated evidence policy snapshot missing");
+	}
+	if (!policy.policy_id || !isSha256(policy.calibration_scope_hash) || !isSha256(policy.calibration_artifact_hash)) {
+		throw new Error("validated evidence policy snapshot is incomplete");
+	}
+	if (
+		!isSha256(policy.development_dataset_hash) ||
+		!isSha256(policy.holdout_dataset_hash) ||
+		!Number.isFinite(policy.evidence_threshold) ||
+		policy.evidence_threshold < -1 ||
+		policy.evidence_threshold > 1
+	) {
+		throw new Error("validated evidence policy snapshot is invalid");
+	}
+	if (policy.raw_similarity_mode !== "fragment-max-view-v1") {
+		throw new Error("validated evidence policy snapshot mode mismatch");
+	}
+	if (policy.calibration_scope_hash !== evidencePolicyScopeHash(expectedScope)) {
+		throw new Error("validated evidence policy snapshot scope mismatch");
+	}
+}
+
+export function hasValidatedEvidencePolicy(
+	policy: EvidenceGatePolicySnapshot | null | undefined,
+	expectedScope: EvidencePolicyScope,
+): policy is EvidenceGatePolicySnapshot {
+	try {
+		assertValidatedEvidencePolicy(policy, expectedScope);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 export function readValidatedEvidencePolicy(filePath: string, expectedScope: EvidencePolicyScope): EvidenceGatePolicySnapshot {
 	const artifact = JSON.parse(fs.readFileSync(filePath, "utf8")) as EvidenceCalibrationArtifact;
 	if (artifact.artifact_schema_version !== 1 || artifact.artifact_type !== "multiview-evidence-gate-policy" || artifact.status !== "validated") {
@@ -69,8 +112,10 @@ export function readValidatedEvidencePolicy(filePath: string, expectedScope: Evi
 		throw new Error("evidence policy artifact scope mismatch");
 	}
 	if (!Number.isFinite(artifact.evidence_threshold) || artifact.evidence_threshold < -1 || artifact.evidence_threshold > 1) throw new Error("invalid evidence policy threshold");
-	if (artifact.raw_similarity_mode !== "fragment-max-view-v1" || !artifact.development?.dataset_hash || !artifact.holdout?.dataset_hash) throw new Error("evidence policy artifact is incomplete");
-	return {
+	if (!artifact.policy_id || artifact.raw_similarity_mode !== "fragment-max-view-v1" || !artifact.development?.dataset_hash || !artifact.holdout?.dataset_hash) {
+		throw new Error("evidence policy artifact is incomplete");
+	}
+	const policy: EvidenceGatePolicySnapshot = {
 		policy_schema_version: 1,
 		policy_id: artifact.policy_id,
 		status: "validated",
@@ -81,4 +126,6 @@ export function readValidatedEvidencePolicy(filePath: string, expectedScope: Evi
 		development_dataset_hash: artifact.development.dataset_hash,
 		holdout_dataset_hash: artifact.holdout.dataset_hash,
 	};
+	assertValidatedEvidencePolicy(policy, expectedScope);
+	return policy;
 }

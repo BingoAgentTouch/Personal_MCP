@@ -58,6 +58,14 @@ function contractBodyHash(contract) {
 	const { contract_content_hash: _ignored, ...body } = contract;
 	return hash(canonicalJson(body));
 }
+function policyScopeForManifest(manifest) {
+	return evidencePolicy.currentEvidencePolicyScope(manifest.embedding_model_id, manifest.tokenizer_id);
+}
+function assertValidatedManifestPolicy(manifest) {
+	if (!generation.isMultiviewGeneration(manifest)) return;
+	evidencePolicy.assertValidatedEvidencePolicy(manifest.evidence_policy, policyScopeForManifest(manifest));
+	if (manifest.evidence_policy_id !== manifest.evidence_policy.policy_id) throw new Error("active multiview evidence policy snapshot mismatch");
+}
 function loadSealedContract() {
 	const contract = readJsonFile(compactionContractPath);
 	if (!contract) throw new Error("compaction merge contract missing");
@@ -127,13 +135,14 @@ function loadModules() {
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/provider.js")).href),
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/generation.js")).href),
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/delta.js")).href),
+		import(pathToFileURL(path.join(ROOT, "dist/embedding/evidence-policy.js")).href),
 	]);
 }
 
-const [fragments, builder, provider, generation, delta] = await loadModules();
+const [fragments, builder, provider, generation, delta, evidencePolicy] = await loadModules();
 
 if (!command || !["preflight", "build", "validate", "switch", "unlock"].includes(command)) {
-	console.error("Usage: node compact_embeddings.mjs preflight|build|validate|switch|unlock [--generation ID] [--representation single|multiview] [--memory-root PATH]");
+	console.error("Usage: node compact_embeddings.mjs preflight|build|validate|switch|unlock [--generation ID] [--representation single|multiview] [--evidence-policy PATH] [--memory-root PATH]");
 	process.exit(2);
 }
 
@@ -149,7 +158,7 @@ function inventory() {
 	return { rows, hash: hash(canonicalJson(rows)) };
 }
 
-async function validateGeneration(generationId, expectedInventoryHash, expectedTargetGenerationId = null) {
+async function validateGeneration(generationId, expectedInventoryHash, expectedTargetGenerationId = null, expectedRepresentationIdentityHash = null) {
 	const manifest = generation.readGenerationManifest(generationId);
 	if (!manifest) throw new Error(`generation not found: ${generationId}`);
 	const result = inventory();
@@ -159,6 +168,9 @@ async function validateGeneration(generationId, expectedInventoryHash, expectedT
 	if (expectedInventoryHash && manifest.source_inventory_hash !== expectedInventoryHash) failures.push("source inventory hash mismatch vs build snapshot");
 	if (expectedTargetGenerationId && generationId !== expectedTargetGenerationId) {
 		failures.push(`generation id mismatch vs build snapshot: ${generationId} != ${expectedTargetGenerationId}`);
+	}
+	if (expectedRepresentationIdentityHash && manifest.representation_identity_hash !== expectedRepresentationIdentityHash) {
+		failures.push("representation identity mismatch vs compaction contract");
 	}
 	const validation = { ...shared, failures, valid: failures.length === 0 };
 	return {
@@ -179,9 +191,10 @@ if (command === "unlock") {
 }
 
 if (command === "preflight") {
-	delta.createCompactionLock();
 	const active = generation.getActiveGeneration();
 	if (!active) throw new Error("active generation not found");
+	assertValidatedManifestPolicy(active);
+	delta.createCompactionLock();
 	const ensured = delta.ensureActiveDelta();
 	const compatibility = delta.currentDeltaCompatibility();
 	if (!compatibility.compatible) throw new Error(compatibility.reason ?? "delta incompatible");
@@ -213,8 +226,21 @@ if (command === "build") {
 	if (generationId === contract.base.generation_id) throw new Error("target generation id must differ from active base generation");
 	const inv = inventory();
 	if (inv.hash !== contract.source_inventory_hash) throw new Error("source changed before build; stop compaction");
-	await generation.createGeneration(generationId, inv.hash, 384, representationKind);
-	const buildManifest = generation.setGenerationExpectedCount(generationId, inv.rows.length);
+	const policyPath = options.get("evidence-policy");
+	let validatedPolicy = null;
+	if (representationKind === "multiview") {
+		if (!active) throw new Error("active generation not found");
+		assertValidatedManifestPolicy(active);
+		if (!policyPath) throw new Error("--evidence-policy is required for multiview build");
+		validatedPolicy = evidencePolicy.readValidatedEvidencePolicy(path.resolve(policyPath), policyScopeForManifest(active));
+		if (canonicalJson(validatedPolicy) !== canonicalJson(active.evidence_policy)) {
+			throw new Error("multiview compaction evidence policy must match active generation");
+		}
+	}
+	const createdManifest = representationKind === "multiview"
+		? await generation.createGeneration(generationId, inv.hash, 384, "multiview", validatedPolicy)
+		: await generation.createGeneration(generationId, inv.hash, 384, "single");
+	const buildManifest = generation.setGenerationExpectedCount(createdManifest.generation_id, inv.rows.length);
 	let ok = 0;
 	const failures = [];
 	const viewCounts = representationKind === "multiview" ? createViewCounts() : null;
@@ -290,7 +316,7 @@ if (command === "validate") {
 	if (snapshot.source_inventory_hash !== planned.source_inventory_hash) {
 		throw new Error(`source inventory drifted vs contract: ${snapshot.source_inventory_hash} != ${planned.source_inventory_hash}`);
 	}
-	const checked = await validateGeneration(generationId, snapshot.source_inventory_hash, snapshot.generation_id);
+	const checked = await validateGeneration(generationId, snapshot.source_inventory_hash, snapshot.generation_id, planned.representation.identity_hash);
 	report({
 		command,
 		generation_id: generationId,
@@ -318,7 +344,7 @@ if (command === "switch") {
 	const before = inventory();
 	if (before.hash !== snapshot.source_inventory_hash) throw new Error("source changed before switch; stop compaction");
 	if (before.hash !== planned.source_inventory_hash) throw new Error("source changed vs compaction contract; stop compaction");
-	const checked = await validateGeneration(generationId, snapshot.source_inventory_hash, snapshot.generation_id);
+	const checked = await validateGeneration(generationId, snapshot.source_inventory_hash, snapshot.generation_id, planned.representation.identity_hash);
 	generation.assertGenerationReadyForActivation(checked.manifest, checked.validation);
 	const pointer = generation.activateGeneration(generationId);
 	const activatedManifest = generation.readGenerationManifest(generationId);

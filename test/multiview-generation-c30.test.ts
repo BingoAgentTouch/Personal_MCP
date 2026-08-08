@@ -9,6 +9,7 @@ const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "memory-mcp-multiview-c30
 process.chdir(tempRoot);
 
 const generation = await import("../src/embedding/generation.ts");
+const { validEvidencePolicy } = await import("./evidence-policy-fixture.ts");
 
 function view(view_id: string, kind: "summary" | "evidence", vector: number[]) {
 	return {
@@ -46,7 +47,7 @@ describe("multiview generation lifecycle", () => {
 	});
 
 	test("creates, writes, round-trips, and finalizes a multiview generation", async () => {
-		const manifest = await generation.createGeneration("gen_mv_c30", "sha256:inventory", 2, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_c30", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 		generation.setGenerationExpectedCount(manifest.generation_id, 1);
 
 		const record = generation.writeGenerationViews(manifest, "2026-08-07/frag_300", "sha256:source", [
@@ -75,7 +76,7 @@ describe("multiview generation lifecycle", () => {
 	});
 
 	test("rejects invalid multiview views without leaving fragment files behind", async () => {
-		const manifest = await generation.createGeneration("gen_mv_c30_invalid", "sha256:inventory", 2, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_c30_invalid", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 		generation.setGenerationExpectedCount(manifest.generation_id, 1);
 
 		assert.throws(
@@ -90,7 +91,7 @@ describe("multiview generation lifecycle", () => {
 	});
 
 	test("returns null for a corrupt multiview sidecar", async () => {
-		const manifest = await generation.createGeneration("gen_mv_c30_corrupt", "sha256:inventory", 2, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_c30_corrupt", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 		generation.setGenerationExpectedCount(manifest.generation_id, 1);
 		generation.writeGenerationViews(manifest, "2026-08-07/frag_302", "sha256:source", [
 			view("summary", "summary", [0.5, 0.5]),

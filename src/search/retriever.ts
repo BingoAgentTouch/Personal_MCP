@@ -13,6 +13,7 @@ import { getDailySummaryMeta } from "../storage/daily.js";
 import { getTopic } from "../storage/topics.js";
 import { encode, cosine, jaccardSimilarity, isFallbackMode } from "../embedding/provider.js";
 import { buildQueryInput } from "../embedding/builder.js";
+import { currentEvidencePolicyScope, hasValidatedEvidencePolicy } from "../embedding/evidence-policy.js";
 import {
 	generationVectorPath,
 	getActiveGeneration,
@@ -52,6 +53,8 @@ type LoadedMultiview = { views: EffectiveMultiviewView[]; layer: EmbeddingLayer 
 
 interface RetrievalIdentity {
 	generationId: string | null;
+	modelId: string | null;
+	tokenizerId: string | null;
 	representationIdentityHash: string | null;
 	retrievalEpoch: string | null;
 	evidencePolicyId: string | null;
@@ -149,6 +152,22 @@ function lexicalSnippet(query: string, source: string): string | null {
 	return points.slice(start, end).join("").trim() || null;
 }
 
+function validTurnsTextRange(fragment: NonNullable<ReturnType<typeof getFragment>>, span: EmbeddingSourceSpan): EmbeddingSourceSpan | null {
+	if (
+		span.source_field !== "turns_text" ||
+		!Number.isInteger(span.start_char) ||
+		!Number.isInteger(span.end_char) ||
+		!Number.isInteger(span.start_token) ||
+		!Number.isInteger(span.end_token) ||
+		span.start_char < 0 ||
+		span.end_char < span.start_char ||
+		span.end_char > fragment.turns_text.length ||
+		span.start_token < 0 ||
+		span.end_token < span.start_token
+	) return null;
+	return span;
+}
+
 function viewDisclosure(query: string, fragment: NonNullable<ReturnType<typeof getFragment>>, view?: EffectiveMultiviewView): {
 	matchedView: string | null;
 	matchedSourceRange: EmbeddingSourceSpan | null;
@@ -164,20 +183,25 @@ function viewDisclosure(query: string, fragment: NonNullable<ReturnType<typeof g
 			snippetAnchor: view.disclosure.snippet ? "view_fallback" : null,
 		};
 	}
-	const sourceRange = view.source_spans.find((span) => span.source_field === "turns_text") ?? null;
+	const sourceRange = view.source_spans
+		.map((span) => validTurnsTextRange(fragment, span))
+		.find((span): span is EmbeddingSourceSpan => span !== null) ?? null;
 	if (!sourceRange) return {
 		matchedView: view.view_id,
 		matchedSourceRange: null,
-		matchedSnippet: view.disclosure.snippet || null,
-		snippetAnchor: view.disclosure.snippet ? "view_fallback" : null,
+		matchedSnippet: null,
+		snippetAnchor: null,
 	};
 	const source = fragment.turns_text.slice(sourceRange.start_char, sourceRange.end_char);
 	const anchored = lexicalSnippet(query, source);
+	const fallback = view.disclosure.snippet && source.includes(view.disclosure.snippet)
+		? view.disclosure.snippet
+		: null;
 	return {
 		matchedView: view.view_id,
 		matchedSourceRange: sourceRange,
-		matchedSnippet: anchored ?? view.disclosure.snippet ?? null,
-		snippetAnchor: anchored ? "lexical_overlap" : view.disclosure.snippet ? "view_fallback" : null,
+		matchedSnippet: anchored ?? fallback,
+		snippetAnchor: anchored ? "lexical_overlap" : fallback ? "view_fallback" : null,
 	};
 }
 
@@ -225,8 +249,11 @@ function aggregateMultiview(
 			else evidence = chooseBestView(evidence, candidate);
 		}
 		const policy = identity.evidencePolicy;
-		const evidenceAllowed = Boolean(policy?.status === "validated" && policy.raw_similarity_mode === "fragment-max-view-v1");
-		const evidencePassed = Boolean(evidenceAllowed && evidence && evidence.score >= policy!.evidence_threshold);
+		const evidenceAllowed = identity.modelId !== null && identity.tokenizerId !== null && hasValidatedEvidencePolicy(
+			policy,
+			currentEvidencePolicyScope(identity.modelId, identity.tokenizerId),
+		);
+		const evidencePassed = Boolean(evidenceAllowed && evidence && evidence.score >= policy.evidence_threshold);
 		const winner = evidencePassed && evidence && (!summary || evidence.score >= summary.score) ? evidence : summary;
 		if (!winner || winner.score <= 0) continue;
 		scored.push({
@@ -252,7 +279,7 @@ function fallbackSearch(query: string, topK: number, agentId?: string): SearchRe
 		const score = jaccardSimilarity(query, text);
 		if (score > 0) scored.push({ id: fragId, rawSimilarity: score, layer: "base", rawSimilarityMode: "fragment-fallback-jaccard-v1" });
 	}
-	return weightAndRerank(scored, topK, null, null, { generationId: null, representationIdentityHash: null, retrievalEpoch: null, evidencePolicyId: null, evidencePolicy: null }, query);
+	return weightAndRerank(scored, topK, null, null, { generationId: null, modelId: null, tokenizerId: null, representationIdentityHash: null, retrievalEpoch: null, evidencePolicyId: null, evidencePolicy: null }, query);
 }
 
 /** 构建单个结果条目（含层级回溯 + 三分数透出） */
@@ -309,6 +336,8 @@ export async function search(query: string, topK: number = 10, agentId?: string)
 	const active = getActiveGeneration();
 	const identity: RetrievalIdentity = {
 		generationId: active?.generation_id ?? null,
+		modelId: active?.embedding_model_id ?? null,
+		tokenizerId: active?.tokenizer_id ?? null,
 		representationIdentityHash: active?.representation_identity_hash ?? null,
 		retrievalEpoch: active?.retrieval_epoch ?? null,
 		evidencePolicyId: active?.evidence_policy_id ?? null,

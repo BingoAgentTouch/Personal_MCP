@@ -142,7 +142,11 @@ node bench/run-multiview-eval.mjs evaluate \
   --output <shadow-report.json>
 ```
 
-`validate` 只有在 hold-out 满足冻结目标时才会输出 `validated` artifact；失败时报告 `no_go`，不得手动把 candidate 标为 validated。artifact 绑定 model/tokenizer、recipe、窗口策略、aggregation/raw-similarity mode、development/hold-out dataset hash 和 canonical artifact hash。真实库的 multiview build → validate → switch 仍需独立维护窗口授权；在 policy artifact、signals epoch 和 shadow 评测完成前不得切换。
+`validate` 只有在 hold-out 满足冻结目标时才会输出 `validated` artifact；失败时报告 `no_go`，不得手动把 candidate 标为 validated。artifact 绑定 model/tokenizer、recipe、窗口策略、aggregation/raw-similarity mode、development/hold-out dataset hash 和 canonical artifact hash。
+
+新的 multiview generation、activation、delta 写入与 compaction 都必须携带并校验该 immutable validated snapshot；compaction 的 artifact 还必须与 active generation 的 snapshot 完全一致。历史 policy-less multiview generation 仍可读取，并在 search 中保持 summary-only shadow；它们不能重新激活或创建/重置/写入 delta。
+
+本项目采用简单、手动维护优先的落地策略，不把大规模生产级 calibration、长时间 shadow observation 或复杂自动运维作为首次启用的前置条件。真实库首次启用时只需在维护窗口完成 multiview build → validate → switch，保留旧 generation，并用少量真实查询做 sanity check；必要时手动回切旧 generation。fixture artifact 不能冒充真实生产阈值，但不再阻塞首次使用。
 
 ## Compaction archive recovery（维护者手动流程）
 

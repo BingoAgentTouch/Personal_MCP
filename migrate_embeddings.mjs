@@ -131,7 +131,7 @@ const delta = deltaModule;
 const evidencePolicy = evidencePolicyModule;
 
 if (!command || !["inventory", "build", "validate", "switch", "rollback"].includes(command)) {
-	console.error("Usage: node migrate_embeddings.mjs inventory|build|validate|switch|rollback [--generation ID] [--representation single|multiview] [--memory-root PATH]");
+	console.error("Usage: node migrate_embeddings.mjs inventory|build|validate|switch|rollback [--generation ID] [--representation single|multiview] [--evidence-policy PATH for multiview build] [--memory-root PATH]");
 	process.exit(2);
 }
 

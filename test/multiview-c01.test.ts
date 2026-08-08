@@ -12,6 +12,10 @@ const generation = await import("../src/embedding/generation.ts");
 const delta = await import("../src/embedding/delta.ts");
 const handlers = await import("../src/mcp/handlers.ts");
 const retriever = await import("../src/search/retriever.ts");
+const builder = await import("../src/embedding/builder.ts");
+const provider = await import("../src/embedding/provider.ts");
+const fragments = await import("../src/storage/fragments.ts");
+const { validEvidencePolicy } = await import("./evidence-policy-fixture.ts");
 
 function snapshotFiles(filePaths: string[]): Map<string, string | null> {
 	return new Map(filePaths.map((filePath) => [filePath, fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : null]));
@@ -72,11 +76,12 @@ describe("C-0/C-1 multiview materialization", () => {
 	});
 
 	test("persists multiview identity and rejects legacy vector writes", async () => {
-		const manifest = await generation.createGeneration("gen_mv_identity", "sha256:inventory", 2, "multiview");
-		assert.equal(manifest.representation_kind, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_identity", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
+		assert.equal(manifest.representation_kind, "multiview", await validEvidencePolicy());
 		assert.equal(manifest.document_recipe_id, "fragment-multiview-budgeted");
 		assert.equal(manifest.aggregation_mode, "fragment-max-view-v1");
-		assert.equal(manifest.evidence_policy_id, "evidence-gate-candidate-v1");
+		assert.equal(manifest.evidence_policy_id, "evidence-gate-test-v1");
+		assert.equal(manifest.evidence_policy?.status, "validated");
 		assert.ok(manifest.representation_identity_hash.startsWith("sha256:"));
 		assert.throws(
 			() => generation.writeGenerationVector(manifest, "2026-08-07/frag_001", [0.5, 0.5], {
@@ -89,7 +94,7 @@ describe("C-0/C-1 multiview materialization", () => {
 	});
 
 	test("materializes summary and evidence views as one delta record", async () => {
-		const manifest = await generation.createGeneration("gen_mv_delta", "sha256:inventory", 2, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_delta", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 		generation.finalizeGeneration(manifest.generation_id);
 		generation.activateGeneration(manifest.generation_id);
 		delta.resetDeltaForActiveGeneration();
@@ -114,7 +119,7 @@ describe("C-0/C-1 multiview materialization", () => {
 	});
 
 	test("creates a fragment through the multiview handler path", async () => {
-		const manifest = await generation.createGeneration("gen_mv_handler", "sha256:inventory", 384, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_handler", "sha256:inventory", 384, "multiview", await validEvidencePolicy());
 		generation.finalizeGeneration(manifest.generation_id);
 		generation.activateGeneration(manifest.generation_id);
 		delta.resetDeltaForActiveGeneration();
@@ -138,7 +143,7 @@ describe("C-0/C-1 multiview materialization", () => {
 	});
 
 	test("restores the previous complete view set when replacement commit fails", async () => {
-		const manifest = await generation.createGeneration("gen_mv_atomic", "sha256:inventory", 2, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_atomic", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 		generation.finalizeGeneration(manifest.generation_id);
 		generation.activateGeneration(manifest.generation_id);
 		delta.resetDeltaForActiveGeneration();
@@ -163,7 +168,7 @@ describe("C-0/C-1 multiview materialization", () => {
 	});
 
 	test("repairs a multiview orphan with a complete rebuild payload", async () => {
-		const manifest = await generation.createGeneration("gen_mv_reconcile", "sha256:inventory", 2, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_reconcile", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 		generation.finalizeGeneration(manifest.generation_id);
 		generation.activateGeneration(manifest.generation_id);
 		delta.resetDeltaForActiveGeneration();
@@ -184,7 +189,7 @@ describe("C-0/C-1 multiview materialization", () => {
 	});
 
 	test("records pending when a multiview orphan rebuild fails", async () => {
-		const manifest = await generation.createGeneration("gen_mv_pending", "sha256:inventory", 2, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_pending", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 		generation.finalizeGeneration(manifest.generation_id);
 		generation.activateGeneration(manifest.generation_id);
 		delta.resetDeltaForActiveGeneration();
@@ -200,7 +205,7 @@ describe("C-0/C-1 multiview materialization", () => {
 	});
 
 	test("keeps the public result fragment-level for multiview retrieval", async () => {
-		const manifest = await generation.createGeneration("gen_mv_search", "sha256:inventory", 384, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_search", "sha256:inventory", 384, "multiview", await validEvidencePolicy());
 		generation.finalizeGeneration(manifest.generation_id);
 		generation.activateGeneration(manifest.generation_id);
 		delta.resetDeltaForActiveGeneration();
@@ -226,11 +231,98 @@ describe("C-0/C-1 multiview materialization", () => {
 		assert.ok("matched_source_range" in item);
 		assert.ok("matched_snippet" in item);
 		assert.ok("snippet_anchor" in item);
-		assert.equal(item.raw_similarity_mode, "fragment-summary-only-shadow-v1");
+		assert.ok(["fragment-max-view-v1", "fragment-summary-only-shadow-v1"].includes(item.raw_similarity_mode as string));
+	});
+
+	test("anchors evidence disclosure to the persisted span and preserves base/delta provenance", async () => {
+		const query = "EVIDENCE_TOKEN";
+		const stored = fragments.createFragment({
+			date: "2026-08-07",
+			start_turn_id: "turn_0001",
+			end_turn_id: "turn_0001",
+			task_desc: "disclosure fixture",
+			result_desc: "persisted evidence range",
+			tags: ["disclosure"],
+			topic_name: "embedding",
+		});
+		const fragmentId = stored.fragment_id;
+		const fragmentPath = path.join(tempRoot, "memory", "fragments", "2026-08-07", `${fragmentId.split("/")[1]}.md`);
+		const raw = fs.readFileSync(fragmentPath, "utf8");
+		fs.writeFileSync(fragmentPath, `${raw}\n## 原文\n\nOUTSIDE_BEFORE\nINSIDE EVIDENCE_TOKEN verified fact\nOUTSIDE_AFTER\n`, "utf8");
+		const fragment = fragments.getFragment(fragmentId)!;
+		const sourceHash = builder.sourceContentHash({
+			task_desc: fragment.task_desc,
+			result_desc: fragment.result_desc,
+			tags: fragment.tags,
+			topic_name: fragment.topic_name,
+			turns_text: fragment.turns_text,
+		});
+		const manifest = await generation.createGeneration("gen_mv_disclosure", "sha256:inventory", 384, "multiview", await validEvidencePolicy(0.1));
+		generation.setGenerationExpectedCount(manifest.generation_id, 1);
+		const start = fragment.turns_text.indexOf("INSIDE EVIDENCE_TOKEN");
+		const end = fragment.turns_text.indexOf("OUTSIDE_AFTER");
+		assert.ok(start >= 0 && end > start);
+		const span = { source_field: "turns_text", start_char: start, end_char: end, start_token: 0, end_token: 8 };
+		const queryVector = await provider.encode((await builder.buildQueryInput(query, manifest)).text);
+		const summaryVector = new Array(queryVector.length).fill(0);
+		const persistedViews = [
+			{
+				view_id: "summary",
+				kind: "summary" as const,
+				vector: summaryVector,
+				input_hash: "sha256:summary",
+				tokens: { used: 1, model_max: 512 },
+				source_spans: [],
+				disclosure: { disclosure_level: "T1" as const, snippet: "summary", snippet_token_count: 1, snippet_anchor: "view_fallback" as const },
+			},
+			{
+				view_id: "evidence_001",
+				kind: "evidence" as const,
+				vector: queryVector,
+				input_hash: "sha256:evidence",
+				tokens: { used: 1, model_max: 512 },
+				source_spans: [span],
+				disclosure: { disclosure_level: "T2" as const, snippet: "INSIDE EVIDENCE_TOKEN verified fact", snippet_token_count: 4, snippet_anchor: "view_fallback" as const },
+			},
+		];
+		generation.writeGenerationViews(manifest, fragmentId, sourceHash, persistedViews);
+		generation.finalizeGeneration(manifest.generation_id);
+		generation.activateGeneration(manifest.generation_id);
+		delta.resetDeltaForActiveGeneration();
+
+		const base = (await retriever.search(query, 1)).results[0]!;
+		assert.equal(base.embedding_layer, "base");
+		assert.equal(base.delta_id, null);
+		assert.equal(base.base_generation_id, manifest.generation_id);
+		assert.equal(base.matched_view, "evidence_001");
+		assert.deepEqual(base.matched_source_range, span);
+		assert.equal(base.snippet_anchor, "lexical_overlap");
+		assert.match(base.matched_snippet ?? "", /EVIDENCE_TOKEN/);
+		assert.doesNotMatch(base.matched_snippet ?? "", /OUTSIDE_BEFORE|OUTSIDE_AFTER/);
+
+		const deltaManifest = delta.ensureActiveDelta();
+		const fallbackQuery = "NO_MATCH_TOKEN";
+		const fallbackVector = await provider.encode((await builder.buildQueryInput(fallbackQuery, manifest)).text);
+		delta.upsertDeltaViews(deltaManifest, fragmentId, sourceHash, [
+			{ ...persistedViews[0], vector: new Array(fallbackVector.length).fill(0) },
+			{
+				...persistedViews[1],
+				vector: fallbackVector,
+				disclosure: { disclosure_level: "T2", snippet: "OUTSIDE_BEFORE", snippet_token_count: 1, snippet_anchor: "view_fallback" },
+			},
+		]);
+		const fromDelta = (await retriever.search(fallbackQuery, 1)).results[0]!;
+		assert.equal(fromDelta.embedding_layer, "delta");
+		assert.equal(fromDelta.base_generation_id, manifest.generation_id);
+		assert.equal(fromDelta.delta_id, deltaManifest.delta_id);
+		assert.equal(fromDelta.matched_view, "evidence_001");
+		assert.deepEqual(fromDelta.matched_source_range, span);
+		assert.equal(fromDelta.matched_snippet, null);
+		assert.equal(fromDelta.snippet_anchor, null);
 	});
 
 	test("rejects invalid view sets before creating sidecar or index entries", async () => {
-		const manifest = await generation.createGeneration("gen_mv_invalid", "sha256:inventory", 2, "multiview");
+		const manifest = await generation.createGeneration("gen_mv_invalid", "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 		generation.finalizeGeneration(manifest.generation_id);
 		generation.activateGeneration(manifest.generation_id);
 		delta.resetDeltaForActiveGeneration();

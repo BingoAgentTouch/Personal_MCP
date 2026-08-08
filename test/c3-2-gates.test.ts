@@ -10,6 +10,7 @@ process.chdir(tempRoot);
 
 const generation = await import("../src/embedding/generation.ts");
 const delta = await import("../src/embedding/delta.ts");
+const { validEvidencePolicy } = await import("./evidence-policy-fixture.ts");
 
 function view(viewId: string, kind: "summary" | "evidence", vector: number[]) {
 	return {
@@ -37,7 +38,7 @@ function view(viewId: string, kind: "summary" | "evidence", vector: number[]) {
 }
 
 async function createReadyMultiviewFixture(generationId: string, fragmentId: string) {
-	const manifest = await generation.createGeneration(generationId, "sha256:inventory", 2, "multiview");
+	const manifest = await generation.createGeneration(generationId, "sha256:inventory", 2, "multiview", await validEvidencePolicy());
 	generation.setGenerationExpectedCount(manifest.generation_id, 1);
 	generation.writeGenerationViews(manifest, fragmentId, "sha256:source", [
 		view("summary", "summary", [0.5, 0.5]),
@@ -55,6 +56,14 @@ after(() => {
 describe("C3-2 gate checks", () => {
 	beforeEach(() => {
 		fs.rmSync(path.join(tempRoot, "memory"), { recursive: true, force: true });
+	});
+
+	test("rejects a policy-less multiview creation before manifest writes", async () => {
+		await assert.rejects(
+			generation.createGeneration("gen_c32_policyless", "sha256:inventory", 2, "multiview", null as never),
+			/validated evidence policy snapshot missing/,
+		);
+		assert.equal(fs.existsSync(generation.generationManifestPath("gen_c32_policyless")), false);
 	});
 
 	test("accepts a clean multiview generation and exposes diagnostic view counts", async () => {
@@ -101,6 +110,17 @@ describe("C3-2 gate checks", () => {
 		assert.match(validation.failures.join("\n"), /multiview payload is missing or corrupt/);
 		assert.deepEqual(validation.view_counts, { total: 0, summary: 0, evidence: 0 });
 		assert.throws(() => generation.assertGenerationReadyForActivation(manifest, validation), /generation validation failed for activation/);
+	});
+
+	test("keeps legacy policy-less multiview state readable but blocks mutations", async () => {
+		const { manifest, fragmentId } = await createReadyMultiviewFixture("gen_c32_legacy", "2026-08-07/frag_104");
+		const legacy = { ...manifest, evidence_policy: null, evidence_policy_id: "evidence-gate-legacy" };
+		generation.writeGenerationManifest(legacy);
+		const persisted = generation.readGenerationManifest(legacy.generation_id)!;
+		assert.equal(persisted.evidence_policy, null);
+		assert.throws(() => generation.activateGeneration(persisted.generation_id), /validated evidence policy snapshot missing/);
+		assert.equal(fs.existsSync(generation.activePointerPath()), false);
+		assert.equal(fragmentId, "2026-08-07/frag_104");
 	});
 
 	test("treats an empty delta as safe and a populated delta as unsafe", async () => {

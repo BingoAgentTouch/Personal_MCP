@@ -23,6 +23,7 @@ import {
 	activePointerSnapshotHash,
 	assertActivePointerSnapshot,
 	generationVectorPath,
+	assertMultiviewGenerationPolicy,
 	getActiveGeneration,
 	isMultiviewGeneration,
 	readActivePointer,
@@ -248,6 +249,16 @@ function activeBaseOrThrow(): { active: EmbeddingGenerationManifest; activeManif
 	return { active, activeManifestHash: pointer.active_manifest_hash };
 }
 
+function assertActiveMultiviewMutationAllowed(): void {
+	const { active } = activeBaseOrThrow();
+	if (isMultiviewGeneration(active)) assertMultiviewGenerationPolicy(active);
+}
+
+function assertMultiviewDeltaMutationAllowed(manifest: EmbeddingDeltaManifest): void {
+	if (manifest.representation_kind !== "multiview") return;
+	assertActiveMultiviewMutationAllowed();
+}
+
 export function deltaManifestPath(): string {
 	return DELTA_MANIFEST_PATH;
 }
@@ -301,6 +312,7 @@ export function writeDeltaIndex(index: Record<string, EmbeddingDeltaRecord>): vo
 }
 
 export function createDeltaManifest(active: EmbeddingGenerationManifest, activeManifestHash: string): EmbeddingDeltaManifest {
+	if (isMultiviewGeneration(active)) assertMultiviewGenerationPolicy(active);
 	const manifest: EmbeddingDeltaManifest = {
 		delta_schema_version: 2,
 		delta_id: nextDeltaId(),
@@ -335,6 +347,7 @@ export function ensureActiveDelta(): EmbeddingDeltaManifest {
 	const existing = readDeltaManifest();
 	if (existing) return existing;
 	const { active, activeManifestHash } = activeBaseOrThrow();
+	if (isMultiviewGeneration(active)) assertMultiviewGenerationPolicy(active);
 	ensureDir(DELTA_BASE);
 	ensureDir(DELTA_VECTORS_BASE);
 	ensureDir(DELTA_TRANSACTIONS_BASE);
@@ -554,6 +567,7 @@ export function assertMigrationSwitchDeltaSafe(): void {
 
 export function assertDeltaWritable(): EmbeddingDeltaManifest {
 	const manifest = ensureActiveDelta();
+	assertMultiviewDeltaMutationAllowed(manifest);
 	if (manifest.state !== "active") throw new Error(`delta is not writable: ${manifest.state}`);
 	const { compatible, reason } = currentDeltaCompatibility();
 	if (!compatible) throw new Error(reason ?? "delta incompatible with active generation");
@@ -654,6 +668,7 @@ export function upsertDeltaViews(
 	fileOps: DeltaFileOps = defaultDeltaFileOps,
 ): EmbeddingDeltaRecord {
 	if (manifest.representation_kind !== "multiview") throw new Error(`multiview delta write requires multiview delta: ${manifest.delta_id}`);
+	assertMultiviewDeltaMutationAllowed(manifest);
 	if (!views.length || views.filter((view) => view.kind === "summary").length !== 1) throw new Error(`multiview materialization requires exactly one summary view for ${fragmentId}`);
 	const ids = new Set<string>();
 	const materialized: EmbeddingMaterializedView[] = [];
@@ -1225,6 +1240,7 @@ function buildDeltaCompactionEntry(
 
 export function planCompactionMergeContract(): CompactionMergeContract {
 	const active = getActiveGeneration();
+	if (active && isMultiviewGeneration(active)) assertMultiviewGenerationPolicy(active);
 	const pointer = readActivePointer();
 	const delta = readDeltaManifest();
 	const compatibility = currentDeltaCompatibility();
@@ -1950,6 +1966,7 @@ export function recoverDeltaRestoreTransaction(ops: RestoreFileOps = defaultRest
 
 export function resetDeltaForActiveGeneration(): EmbeddingDeltaManifest {
 	const { active, activeManifestHash } = activeBaseOrThrow();
+	if (isMultiviewGeneration(active)) assertMultiviewGenerationPolicy(active);
 	if (fs.existsSync(DELTA_INDEX_PATH)) fs.unlinkSync(DELTA_INDEX_PATH);
 	if (fs.existsSync(DELTA_MANIFEST_PATH)) fs.unlinkSync(DELTA_MANIFEST_PATH);
 	if (fs.existsSync(DELTA_VECTORS_BASE)) fs.rmSync(DELTA_VECTORS_BASE, { recursive: true, force: true });
@@ -1961,6 +1978,7 @@ export function resetDeltaForActiveGeneration(): EmbeddingDeltaManifest {
 }
 
 export function createPendingDeltaRecord(manifest: EmbeddingDeltaManifest, fragmentId: string, failure: string): EmbeddingDeltaRecord {
+	assertMultiviewDeltaMutationAllowed(manifest);
 	const index = readDeltaIndex();
 	const record: EmbeddingDeltaRecord = {
 		record_schema_version: 1,
@@ -2066,6 +2084,7 @@ export async function reconcileOrphans(
 ): Promise<{ repaired_orphans: number; tombstoned_orphans: number; pending_count: number }> {
 	const active = getActiveGeneration();
 	if (!active) return { repaired_orphans: 0, tombstoned_orphans: 0, pending_count: 0 };
+	if (isMultiviewGeneration(active)) assertMultiviewGenerationPolicy(active);
 	const manifest = ensureActiveDelta();
 	const index = readDeltaIndex();
 	const baseIndex = readGenerationIndex(active.generation_id);
