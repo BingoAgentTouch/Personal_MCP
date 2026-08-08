@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 
 const originalCwd = process.cwd();
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "memory-mcp-c3-3b-"));
@@ -48,6 +49,52 @@ function snapshot(root: string): Map<string, string> {
 	};
 	visit(root);
 	return result;
+}
+
+function snapshotLiveRestoreState(): Map<string, string> {
+	const result = new Map<string, string>();
+	const deltaRoot = path.join(tempRoot, "memory", "embedding_delta");
+	for (const [relativePath, content] of snapshot(deltaRoot)) {
+		const normalized = relativePath.split(path.sep).join("/");
+		if (!normalized.startsWith("archive/")) result.set(`embedding_delta/${normalized}`, content);
+	}
+	const pointerPath = generation.activePointerPath();
+	if (fs.existsSync(pointerPath)) result.set("embedding_active.json", fs.readFileSync(pointerPath, "utf8"));
+	return result;
+}
+
+function canonicalize(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalize);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, item]) => [key, canonicalize(item)]),
+		);
+	}
+	return value;
+}
+
+function sha256(value: string | Buffer): string {
+	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(canonicalize(value));
+}
+
+function writeJson(filePath: string, value: unknown): void {
+	fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function receiptContentHash(receipt: Record<string, unknown>): string {
+	const { receipt_content_hash: _ignored, ...body } = receipt;
+	return sha256(canonicalJson(body));
+}
+
+function contractContentHash(contract: Record<string, unknown>): string {
+	const { contract_content_hash: _ignored, ...body } = contract;
+	return sha256(canonicalJson(body));
 }
 
 function realOps(): any {
@@ -124,6 +171,49 @@ describe("C3-3B archived delta recovery", () => {
 		assert.throws(() => delta.restoreArchivedDelta(archivePath), /archive verification failed/);
 		const afterFiles = snapshot(path.join(tempRoot, "memory"));
 		assert.deepEqual([...afterFiles.keys()].filter((key) => beforeFiles.has(key)).sort(), [...beforeFiles].sort());
+	});
+
+	test("rejects a receipt target pointer whose enclosing hash was recomputed", async () => {
+		const { archivePath } = await compactFixture();
+		const before = snapshotLiveRestoreState();
+		const receiptPath = path.join(archivePath, "merge_receipt.json");
+		const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")) as Record<string, any>;
+		receipt.pointer_snapshots.target.previous_generation_id = "gen_unrelated";
+		receipt.receipt_content_hash = receiptContentHash(receipt);
+		writeJson(receiptPath, receipt);
+
+		const verified = delta.verifyArchivedDelta(archivePath);
+		assert.equal(verified.valid, false);
+		assert.match(verified.failures.join("\n"), /archive target pointer snapshot mismatch/);
+		assert.throws(() => delta.restoreArchivedDelta(archivePath), /archive verification failed/);
+		assert.deepEqual([...snapshotLiveRestoreState()].sort(), [...before].sort());
+	});
+
+	test("rejects a contract representation mismatch after refreshing enclosing integrity metadata", async () => {
+		const { archivePath } = await compactFixture();
+		const before = snapshotLiveRestoreState();
+		const contractPath = path.join(archivePath, "merge_contract.json");
+		const receiptPath = path.join(archivePath, "merge_receipt.json");
+		const contract = JSON.parse(fs.readFileSync(contractPath, "utf8")) as Record<string, any>;
+		contract.representation.dimension = 3;
+		contract.contract_content_hash = contractContentHash(contract);
+		writeJson(contractPath, contract);
+
+		const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")) as Record<string, any>;
+		const contractBytes = fs.readFileSync(contractPath);
+		receipt.contract_hash = contract.contract_content_hash;
+		receipt.archive_files["merge_contract.json"] = {
+			sha256: sha256(contractBytes),
+			size_bytes: contractBytes.length,
+		};
+		receipt.receipt_content_hash = receiptContentHash(receipt);
+		writeJson(receiptPath, receipt);
+
+		const verified = delta.verifyArchivedDelta(archivePath);
+		assert.equal(verified.valid, false);
+		assert.match(verified.failures.join("\n"), /archived delta vector metadata mismatch/);
+		assert.throws(() => delta.restoreArchivedDelta(archivePath), /archive verification failed/);
+		assert.deepEqual([...snapshotLiveRestoreState()].sort(), [...before].sort());
 	});
 
 	test("rejects restoration when a non-empty target delta would be overwritten", async () => {

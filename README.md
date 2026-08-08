@@ -122,6 +122,33 @@ node <绝对路径>/migrate_embeddings.mjs switch --generation gen_YYYYMMDD_xxx
 
 当前简化模型下，服务器启动不会自动做 orphan reconcile 或后台修复；如果你怀疑 delta/base 状态不一致，直接走手动 rebuild + switch。
 
+## Compaction archive recovery（维护者手动流程）
+
+此流程只用于恢复一个 **C3-3B v2 compaction archive**：把 archive 中的 sealed delta 和记录的 base active pointer 原样恢复。它不是通用 JSON 修复、`migrate_embeddings.mjs` 的 rollback、orphan reconcile，也不是面向日常用户的操作。
+
+当前没有公开的 restore CLI 或 MCP tool；仅维护者可在受控环境中调用内部 API：`verifyArchivedDelta(archivePath)`、`restoreArchivedDelta(archivePath)`、`recoverDeltaRestoreTransaction()`。**不要**手动复制 archive 文件、改写 `embedding_active.json`、删除 transaction，或把 `compact_embeddings.mjs unlock` 当作通用恢复手段。
+
+恢复前按顺序完成：
+
+1. 停止 MCP server 和全部写入方，记录绝对 memory root、候选 archive 路径、当前 active pointer、delta manifest/index 摘要、compaction lock，以及 `memory/embedding_delta/transactions/restore-*` 目录。
+2. 对整个 memory root 做独立的字节级备份；恢复流程不会替代这一份操作前备份。
+3. 只选择 `memory/embedding_delta/archive/<delta-id>-into-<target-generation-id>/` 下的 archive。它必须包含 `merge_receipt.json`、`merge_contract.json`、`manifest.json`、`delta_index.json`；有 materialized record 时还必须有对应 `vectors/` payload。
+4. 先执行 `verifyArchivedDelta(archivePath)`，只有返回 `valid: true` 才能继续。v1 receipt、任意 payload/receipt/contract/pointer 校验失败都必须停止，不能尝试“修好” archive 后继续。
+5. `restoreArchivedDelta(archivePath)` 会再次拒绝 source inventory 漂移、active pointer 不等于 receipt target pointer、非空的 post-compaction target delta、或已有未完成 restore transaction。满足条件后它才会恢复 archive 的 sealed delta，并最后写入 receipt base pointer。
+6. 成功后确认：active pointer 等于 `receipt.pointer_snapshots.base`；live delta 的 ID/payload 等于 archive、状态为 `sealed`、兼容性正常；target generation 与 archive 均仍存在；没有遗留 `restore-*` transaction。
+
+正常调用返回 `{ restored: true, idempotent: false }`；若已经完全处于 archive 记录的 base+sealed-delta 状态，会返回 `{ restored: false, idempotent: true }`。若出现 `recovery_failed: true`，保留其 `transaction_path`、archive、pointer/manifest 快照和错误输出，**不要重跑 restore 或手动清理**；由维护者先调用一次 `recoverDeltaRestoreTransaction()`。多个 restore transaction、未知 transaction schema、archive 验证失败或 recovery 再次失败都属于停止并人工检查的条件，不能 force-unlock。
+
+当没有有效 archive、source 已变化或 pointer 状态不满足恢复前提时，走受控 rebuild：
+
+```bash
+node <绝对路径>/migrate_embeddings.mjs build --generation gen_YYYYMMDD_xxx
+node <绝对路径>/migrate_embeddings.mjs validate --generation gen_YYYYMMDD_xxx
+node <绝对路径>/migrate_embeddings.mjs switch --generation gen_YYYYMMDD_xxx
+```
+
+对真实 memory root 的复制副本演练、自动启动恢复、公开 restore CLI 和 MCP restore tool 都是后续独立授权事项；本文档不启用它们。
+
 ---
 
 ## MCP 工具一览
