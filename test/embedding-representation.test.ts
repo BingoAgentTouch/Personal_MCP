@@ -10,6 +10,7 @@ process.chdir(tempRoot);
 
 const builder = await import("../src/embedding/builder.ts");
 const generation = await import("../src/embedding/generation.ts");
+const delta = await import("../src/embedding/delta.ts");
 
 after(() => {
 	process.chdir(originalCwd);

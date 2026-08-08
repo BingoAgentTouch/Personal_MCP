@@ -63,11 +63,46 @@ export interface FragmentWeightMeta {
 // ============================================================
 
 export type EmbeddingGenerationState = "building" | "ready" | "active" | "failed";
+export type EmbeddingRepresentationKind = "single" | "multiview";
+export type EmbeddingViewKind = "summary" | "evidence";
+
+export interface EmbeddingSourceSpan {
+	source_field: string;
+	start_char: number;
+	end_char: number;
+	start_token: number;
+	end_token: number;
+}
+
+export interface EmbeddingViewDisclosure {
+	disclosure_level: "T1" | "T2";
+	snippet: string;
+	snippet_token_count: number;
+	snippet_anchor: "view_fallback";
+}
+
+export interface EmbeddingMaterializedView {
+	view_id: string;
+	kind: EmbeddingViewKind;
+	input_hash: string;
+	vector_hash: string;
+	vector_dimension: number;
+	tokens: unknown;
+	source_spans: EmbeddingSourceSpan[];
+	disclosure: EmbeddingViewDisclosure;
+}
 
 export interface EmbeddingGenerationManifest {
 	manifest_schema_version: number;
 	generation_id: string;
 	state: EmbeddingGenerationState;
+	representation_kind?: EmbeddingRepresentationKind;
+	document_policy_version?: number | null;
+	multiview_policy?: { evidence_window_tokens: number; evidence_overlap_tokens: number; disclosure_snippet_tokens: number } | null;
+	view_schema_version?: number | null;
+	aggregation_mode?: string;
+	evidence_policy_id?: string | null;
+	retrieval_epoch?: string;
 	document_recipe_id: string;
 	document_recipe_version: number;
 	query_recipe_id: string;
@@ -103,6 +138,12 @@ export interface ActiveEmbeddingPointer {
 export interface EmbeddingGenerationRecord {
 	fragment_id: string;
 	generation_id: string;
+	view_id?: string;
+	view_kind?: EmbeddingViewKind;
+	source_spans?: EmbeddingSourceSpan[];
+	disclosure?: EmbeddingViewDisclosure;
+	views?: EmbeddingMaterializedView[];
+	view_set_hash?: string;
 	source_content_hash: string;
 	input_hash: string;
 	vector_hash: string;
@@ -128,6 +169,13 @@ export interface EmbeddingDeltaManifest {
 	delta_schema_version: number;
 	delta_id: string;
 	state: EmbeddingDeltaState;
+	representation_kind?: EmbeddingRepresentationKind;
+	document_policy_version?: number | null;
+	multiview_policy?: { evidence_window_tokens: number; evidence_overlap_tokens: number; disclosure_snippet_tokens: number } | null;
+	view_schema_version?: number | null;
+	aggregation_mode?: string;
+	evidence_policy_id?: string | null;
+	retrieval_epoch?: string;
 	base_generation_id: string;
 	base_manifest_hash: string;
 	representation_identity_hash: string;
@@ -148,6 +196,12 @@ export interface EmbeddingDeltaRecord {
 	record_schema_version: number;
 	delta_id: string;
 	fragment_id: string;
+	view_id?: string;
+	view_kind?: EmbeddingViewKind;
+	source_spans?: EmbeddingSourceSpan[];
+	disclosure?: EmbeddingViewDisclosure;
+	views?: EmbeddingMaterializedView[];
+	view_set_hash?: string;
 	state: EmbeddingDeltaRecordState;
 	operation: "create" | "update" | "delete" | "reconcile";
 	source_content_hash: string | null;

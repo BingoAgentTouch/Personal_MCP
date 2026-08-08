@@ -7,6 +7,9 @@ export const DOCUMENT_RECIPE_VERSION = 1;
 export const MULTIVIEW_DOCUMENT_RECIPE_ID = "fragment-multiview-budgeted";
 export const MULTIVIEW_DOCUMENT_RECIPE_VERSION = 1;
 export const MULTIVIEW_POLICY_VERSION = 1;
+export const MULTIVIEW_AGGREGATION_MODE = "fragment-max-view-v1";
+export const MULTIVIEW_EVIDENCE_POLICY_ID = "evidence-gate-candidate-v1";
+export const MULTIVIEW_RETRIEVAL_EPOCH = "fragment-multiview-v1";
 export const QUERY_RECIPE_ID = "query-plain-normalized";
 export const QUERY_RECIPE_VERSION = 1;
 export const TOKENIZER_REVISION: string | null = null;
@@ -19,7 +22,7 @@ export interface RepresentationManifestLike {
 	embedding_model_id?: string;
 	document_recipe_id?: string;
 	document_recipe_version?: number;
-	document_policy_version?: number;
+	document_policy_version?: number | null;
 	query_recipe_id?: string;
 	query_recipe_version?: number;
 }
@@ -88,6 +91,12 @@ export interface BuiltDocumentView {
 	tokens: MultiViewTokenDiagnostics;
 	disclosure: ViewDisclosureMetadata;
 }
+
+export const DEFAULT_MULTIVIEW_POLICY = {
+	evidence_window_tokens: 288,
+	evidence_overlap_tokens: 48,
+	disclosure_snippet_tokens: 80,
+} as const;
 
 export interface BuiltDocumentViews {
 	recipe_id: typeof MULTIVIEW_DOCUMENT_RECIPE_ID;
@@ -328,9 +337,9 @@ function validateMultiViewOptions(options: Required<MultiViewBuildOptions>): voi
 
 function resolveMultiViewOptions(options?: MultiViewBuildOptions): Required<MultiViewBuildOptions> {
 	const resolved = {
-		evidence_window_tokens: options?.evidence_window_tokens ?? 288,
-		evidence_overlap_tokens: options?.evidence_overlap_tokens ?? 48,
-		disclosure_snippet_tokens: options?.disclosure_snippet_tokens ?? 80,
+		evidence_window_tokens: options?.evidence_window_tokens ?? DEFAULT_MULTIVIEW_POLICY.evidence_window_tokens,
+		evidence_overlap_tokens: options?.evidence_overlap_tokens ?? DEFAULT_MULTIVIEW_POLICY.evidence_overlap_tokens,
+		disclosure_snippet_tokens: options?.disclosure_snippet_tokens ?? DEFAULT_MULTIVIEW_POLICY.disclosure_snippet_tokens,
 	};
 	validateMultiViewOptions(resolved);
 	return resolved;

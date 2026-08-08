@@ -41,7 +41,32 @@ function loadModules() {
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/builder.js")).href),
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/provider.js")).href),
 		import(pathToFileURL(path.join(ROOT, "dist/embedding/generation.js")).href),
+		import(pathToFileURL(path.join(ROOT, "dist/embedding/delta.js")).href),
 	]);
+}
+function parseRepresentationKind(value) {
+	const normalized = value ?? "single";
+	if (normalized === "single" || normalized === "multiview") return normalized;
+	throw new Error(`invalid --representation: ${normalized} (expected single or multiview)`);
+}
+function fragmentInput(fragment) {
+	return {
+		task_desc: fragment.task_desc,
+		result_desc: fragment.result_desc,
+		tags: fragment.tags,
+		topic_name: fragment.topic_name,
+		turns_text: fragment.turns_text,
+	};
+}
+function createViewCounts() {
+	return { total: 0, summary: 0, evidence: 0 };
+}
+function accumulateViewCounts(counts, views) {
+	for (const view of views) {
+		counts.total++;
+		if (view.kind === "summary") counts.summary++;
+		if (view.kind === "evidence") counts.evidence++;
+	}
 }
 function inventory(fragments) {
 	const rows = fragments.listAllFragmentIds().sort().map((fragmentId) => {
@@ -49,13 +74,7 @@ function inventory(fragments) {
 		if (!fragment) throw new Error(`source fragment unreadable: ${fragmentId}`);
 		return {
 			fragment_id: fragmentId,
-			source_content_hash: builder.sourceContentHash({
-				task_desc: fragment.task_desc,
-				result_desc: fragment.result_desc,
-				tags: fragment.tags,
-				topic_name: fragment.topic_name,
-				turns_text: fragment.turns_text,
-			}),
+			source_content_hash: builder.sourceContentHash(fragmentInput(fragment)),
 		};
 	});
 	return { rows, hash: hash(canonicalJson(rows)) };
@@ -83,35 +102,31 @@ async function validateGeneration(generationId) {
 	const result = inventory(fragments);
 	const index = readJson(generationPaths(generationId).index);
 	const tokenizer = await builder.getTokenizerManifest();
-	const failures = [];
-	if (manifest.state !== "ready" && manifest.state !== "active") failures.push(`generation state is ${manifest.state}`);
-	if (manifest.source_inventory_hash !== result.hash) failures.push("source inventory hash mismatch");
+	const representationKind = generation.isMultiviewGeneration(manifest) ? "multiview" : "single";
+	const sharedValidation = generation.validateGenerationRecords(manifest, index, result.rows, result.hash);
+	const failures = [...sharedValidation.failures];
 	if (!manifestIdentityMatches(manifest, tokenizer)) failures.push("runtime identity mismatch");
-	if (manifest.expected_count !== result.rows.length) failures.push("expected count mismatch");
-	if (manifest.materialized_count !== result.rows.length || manifest.failed_count !== 0) failures.push("materialization count mismatch");
-	if (manifest.searchable_coverage !== 1) failures.push("searchable coverage is not 1");
-	for (const row of result.rows) {
-		const record = index[row.fragment_id];
-		if (!record) { failures.push(`${row.fragment_id}: missing record`); continue; }
-		if (record.source_content_hash !== row.source_content_hash) failures.push(`${row.fragment_id}: source hash mismatch`);
-		const vectorPath = path.join(generationPaths(generationId).dir, "vectors", row.fragment_id.split("/")[0], `${row.fragment_id.split("/")[1]}.embedding`);
-		if (!fs.existsSync(vectorPath)) { failures.push(`${row.fragment_id}: missing vector`); continue; }
-		const bytes = fs.readFileSync(vectorPath);
-		if (hash(bytes) !== record.vector_hash) failures.push(`${row.fragment_id}: vector hash mismatch`);
-		const vector = JSON.parse(bytes.toString("utf8"));
-		if (!Array.isArray(vector) || vector.length !== manifest.dimension || vector.some((value) => !Number.isFinite(value))) failures.push(`${row.fragment_id}: vector invalid`);
-	}
-	return { manifest, result, failures };
+	const validation = { ...sharedValidation, failures, valid: failures.length === 0 };
+	return {
+		manifest,
+		result,
+		representationKind,
+		validation,
+		viewCounts: validation.view_counts ?? null,
+		valid: validation.valid,
+		failures,
+	};
 }
 function report(payload) { console.log(JSON.stringify(payload, null, 2)); }
 
-const [fragments, builderModule, providerModule, generationModule] = await loadModules();
+const [fragments, builderModule, providerModule, generationModule, deltaModule] = await loadModules();
 const builder = builderModule;
 const provider = providerModule;
 const generation = generationModule;
+const delta = deltaModule;
 
 if (!command || !["inventory", "build", "validate", "switch", "rollback"].includes(command)) {
-	console.error("Usage: node migrate_embeddings.mjs inventory|build|validate|switch|rollback [--generation ID] [--memory-root PATH]");
+	console.error("Usage: node migrate_embeddings.mjs inventory|build|validate|switch|rollback [--generation ID] [--representation single|multiview] [--memory-root PATH]");
 	process.exit(2);
 }
 
@@ -123,34 +138,53 @@ if (command === "inventory") {
 
 if (command === "build") {
 	const generationId = options.get("generation") || `gen_${Date.now()}`;
+	const representationKind = parseRepresentationKind(options.get("representation"));
 	const result = inventory(fragments);
-	const manifest = await generation.createGeneration(generationId, result.hash, 384);
+	await generation.createGeneration(generationId, result.hash, 384, representationKind);
 	const buildManifest = generation.setGenerationExpectedCount(generationId, result.rows.length);
 	let ok = 0;
 	const failures = [];
+	const viewCounts = representationKind === "multiview" ? createViewCounts() : null;
 	for (const row of result.rows) {
 		const fragment = fragments.getFragment(row.fragment_id);
 		try {
-			const built = await builder.buildDocumentInput({
-				task_desc: fragment.task_desc,
-				result_desc: fragment.result_desc,
-				tags: fragment.tags,
-				topic_name: fragment.topic_name,
-				turns_text: fragment.turns_text,
-			});
-			const vector = await provider.encodeStrict(built.text);
-			generation.writeGenerationVector(buildManifest, row.fragment_id, vector, {
-				source_content_hash: row.source_content_hash,
-				input_hash: built.input_hash,
-				tokens: built.tokens,
-			});
+			const input = fragmentInput(fragment);
+			if (representationKind === "multiview") {
+				const builtViews = await builder.buildDocumentViews(input, buildManifest);
+				if (builtViews.source_content_hash !== row.source_content_hash) throw new Error("source hash mismatch after multiview build");
+				const encodedViews = [];
+				for (const view of builtViews.views) {
+					encodedViews.push({ ...view, vector: await provider.encodeStrict(view.text) });
+				}
+				generation.writeGenerationViews(buildManifest, row.fragment_id, builtViews.source_content_hash, encodedViews);
+				accumulateViewCounts(viewCounts, encodedViews);
+			} else {
+				const built = await builder.buildDocumentInput(input, buildManifest);
+				const vector = await provider.encodeStrict(built.text);
+				generation.writeGenerationVector(buildManifest, row.fragment_id, vector, {
+					source_content_hash: row.source_content_hash,
+					input_hash: built.input_hash,
+					tokens: built.tokens,
+				});
+			}
 			ok++;
 		} catch (error) {
 			failures.push({ fragment_id: row.fragment_id, error: error instanceof Error ? error.message : String(error) });
 		}
 	}
 	const ready = generation.finalizeGeneration(generationId);
-	report({ command, generation_id: generationId, source_inventory_hash: result.hash, expected: result.rows.length, materialized: ok, failed: failures.length, state: ready.state, failures });
+	report({
+		command,
+		generation_id: generationId,
+		representation_kind: ready.representation_kind ?? representationKind,
+		source_inventory_hash: result.hash,
+		expected: result.rows.length,
+		materialized: ok,
+		failed: failures.length,
+		state: ready.state,
+		...(viewCounts ? { view_counts: viewCounts } : {}),
+		failures,
+	});
 	process.exit(failures.length ? 1 : 0);
 }
 
@@ -158,20 +192,31 @@ if (command === "validate") {
 	const generationId = options.get("generation");
 	if (!generationId) throw new Error("--generation is required");
 	const checked = await validateGeneration(generationId);
-	const { manifest, result, failures } = checked;
-	report({ command, generation_id: generationId, source_inventory_hash: result.hash, expected: result.rows.length, materialized: manifest.materialized_count, coverage: manifest.searchable_coverage, failures, valid: failures.length === 0 });
-	process.exit(failures.length ? 1 : 0);
+	report({
+		command,
+		generation_id: generationId,
+		representation_kind: checked.representationKind,
+		source_inventory_hash: checked.result.hash,
+		expected: checked.result.rows.length,
+		materialized: checked.validation.materialized_count,
+		coverage: checked.validation.searchable_coverage,
+		...(checked.viewCounts ? { view_counts: checked.viewCounts } : {}),
+		failures: checked.failures,
+		valid: checked.valid,
+	});
+	process.exit(checked.valid ? 0 : 1);
 }
 
 if (command === "switch") {
 	const generationId = options.get("generation");
 	if (!generationId) throw new Error("--generation is required");
 	const checked = await validateGeneration(generationId);
-	const { manifest, result: before } = checked;
-	if (checked.failures.length) throw new Error(`identity/integrity validation failed: ${checked.failures.join("; ")}`);
-	if (before.hash !== manifest.source_inventory_hash) throw new Error("source changed before switch; stop migration");
+	generation.assertGenerationReadyForActivation(checked.manifest, checked.validation);
+	const live = inventory(fragments);
+	if (live.hash !== checked.manifest.source_inventory_hash) throw new Error("source changed before switch; stop migration");
+	delta.assertMigrationSwitchDeltaSafe();
 	const pointer = generation.activateGeneration(generationId);
-	report({ command, pointer, source_inventory_hash: before.hash, smoke: { active_generation_id: pointer.active_generation_id } });
+	report({ command, pointer, source_inventory_hash: live.hash, smoke: { active_generation_id: pointer.active_generation_id } });
 	process.exit(0);
 }
 
@@ -180,7 +225,11 @@ if (command === "rollback") {
 	const current = readJson(pointerPath);
 	if (!current.previous_generation_id) throw new Error("no previous generation available");
 	const previous = readManifest(current.previous_generation_id);
-	if (previous.state !== "active" && previous.state !== "ready") throw new Error("previous generation is not ready");
+	const live = inventory(fragments);
+	const previousIndex = readJson(generationPaths(current.previous_generation_id).index);
+	const validation = generation.validateGenerationRecords(previous, previousIndex, live.rows, live.hash);
+	generation.assertGenerationReadyForActivation(previous, validation);
+	delta.assertMigrationSwitchDeltaSafe();
 	const pointer = generation.activateGeneration(current.previous_generation_id);
-	report({ command, pointer });
+	report({ command, pointer, source_inventory_hash: live.hash });
 }

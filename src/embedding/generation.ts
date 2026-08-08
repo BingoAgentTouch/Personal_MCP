@@ -5,9 +5,20 @@ import type {
 	ActiveEmbeddingPointer,
 	EmbeddingGenerationManifest,
 	EmbeddingGenerationRecord,
+	EmbeddingMaterializedView,
+	EmbeddingSourceSpan,
+	EmbeddingViewDisclosure,
 } from "../types.js";
+import type { EffectiveMultiviewView } from "./delta.js";
 import { MODEL_ID } from "./provider.js";
 import {
+	MULTIVIEW_AGGREGATION_MODE,
+	MULTIVIEW_DOCUMENT_RECIPE_ID,
+	MULTIVIEW_DOCUMENT_RECIPE_VERSION,
+	MULTIVIEW_EVIDENCE_POLICY_ID,
+	MULTIVIEW_POLICY_VERSION,
+	MULTIVIEW_RETRIEVAL_EPOCH,
+	DEFAULT_MULTIVIEW_POLICY,
 	DOCUMENT_RECIPE_ID,
 	DOCUMENT_RECIPE_VERSION,
 	QUERY_RECIPE_ID,
@@ -52,6 +63,15 @@ function generationDir(generationId: string): string {
 	return path.join(GENERATIONS_BASE, generationId);
 }
 
+export function representationKind(manifest: Pick<EmbeddingGenerationManifest, "representation_kind" | "document_recipe_id">): "single" | "multiview" {
+	if (manifest.representation_kind === "multiview" || manifest.document_recipe_id === MULTIVIEW_DOCUMENT_RECIPE_ID) return "multiview";
+	return "single";
+}
+
+export function isMultiviewGeneration(manifest: Pick<EmbeddingGenerationManifest, "representation_kind" | "document_recipe_id">): boolean {
+	return representationKind(manifest) === "multiview";
+}
+
 function parseFragmentId(fragmentId: string): [string, string] {
 	const [date, id, extra] = fragmentId.split("/");
 	if (!date || !id || extra || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^frag_\d+$/.test(id)) {
@@ -77,11 +97,171 @@ export function generationVectorPath(generationId: string, fragmentId: string): 
 	return path.join(generationDir(generationId), "vectors", date, `${id}.embedding`);
 }
 
+export function generationMultiviewSidecarPath(generationId: string, fragmentId: string): string {
+	const [date, id] = parseFragmentId(fragmentId);
+	return path.join(generationDir(generationId), "vectors", date, id, "views.json");
+}
+
 function atomicWrite(filePath: string, content: string): void {
 	ensureDir(path.dirname(filePath));
 	const tempPath = `${filePath}.tmp`;
 	fs.writeFileSync(tempPath, content, "utf8");
 	fs.renameSync(tempPath, filePath);
+}
+
+let generationTransactionSequence = 0;
+
+function nextGenerationTransactionId(): string {
+	generationTransactionSequence += 1;
+	return `multiview-${Date.now()}-${process.pid}-${generationTransactionSequence}`;
+}
+
+function generationTransactionRoot(generationId: string, operationId: string): string {
+	return path.join(generationDir(generationId), "transactions", operationId);
+}
+
+function removeIfExists(filePath: string): void {
+	if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+}
+
+interface GenerationTransactionTarget {
+	livePath: string;
+	stagedPath: string;
+	originalContent: string | null;
+}
+
+function writeGenerationTransactionState(
+	transactionRoot: string,
+	state: string,
+	targets: GenerationTransactionTarget[],
+): void {
+	ensureDir(transactionRoot);
+	fs.writeFileSync(
+		path.join(transactionRoot, "transaction.json"),
+		`${JSON.stringify({ state, targets: targets.map(({ livePath, stagedPath, originalContent }) => ({ livePath, stagedPath, existed: originalContent !== null })) }, null, 2)}\n`,
+		"utf8",
+	);
+}
+
+function rollbackGenerationTransaction(targets: GenerationTransactionTarget[]): void {
+	for (const target of [...targets].reverse()) {
+		removeIfExists(target.livePath);
+		if (target.originalContent !== null) {
+			ensureDir(path.dirname(target.livePath));
+			fs.writeFileSync(target.livePath, target.originalContent, "utf8");
+		}
+	}
+}
+
+function commitGenerationFragmentFiles(
+	generationId: string,
+	fragmentId: string,
+	contents: Array<{ livePath: string; content: string }>,
+): void {
+	const transactionRoot = generationTransactionRoot(generationId, nextGenerationTransactionId());
+	const targets: GenerationTransactionTarget[] = contents.map(({ livePath }, index) => ({
+		livePath,
+		stagedPath: path.join(transactionRoot, "staged", `${index}.tmp`),
+		originalContent: fs.existsSync(livePath) ? fs.readFileSync(livePath, "utf8") : null,
+	}));
+	try {
+		ensureDir(path.join(transactionRoot, "staged"));
+		writeGenerationTransactionState(transactionRoot, "prepared", targets);
+		for (let index = 0; index < contents.length; index += 1) {
+			fs.writeFileSync(targets[index].stagedPath, contents[index].content, "utf8");
+		}
+		writeGenerationTransactionState(transactionRoot, "committing", targets);
+		for (const target of targets) {
+			removeIfExists(target.livePath);
+			ensureDir(path.dirname(target.livePath));
+			fs.renameSync(target.stagedPath, target.livePath);
+		}
+		writeGenerationTransactionState(transactionRoot, "completed", targets);
+		fs.rmSync(transactionRoot, { recursive: true, force: true });
+	} catch (error) {
+		try {
+			rollbackGenerationTransaction(targets);
+			fs.rmSync(transactionRoot, { recursive: true, force: true });
+		} catch (rollbackError) {
+			try {
+				writeGenerationTransactionState(transactionRoot, "rollback_failed", targets);
+			} catch {
+				// Preserve the transaction directory even if its state marker cannot be updated.
+			}
+			throw new Error(
+				`multiview generation transaction failed for ${generationId}/${fragmentId}: ${error instanceof Error ? error.message : String(error)}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+			);
+		}
+		throw error;
+	}
+}
+
+function viewSetHash(views: EmbeddingMaterializedView[]): string {
+	return hashBytes(canonicalJson(views));
+}
+
+function readJsonVector(filePath: string): number[] | null {
+	if (!fs.existsSync(filePath)) return null;
+	try {
+		const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+		return Array.isArray(value) && value.every((item) => typeof item === "number" && Number.isFinite(item)) ? value : null;
+	} catch {
+		return null;
+	}
+}
+
+function coverageEquals(left: number, right: number): boolean {
+	return Math.abs(left - right) <= Number.EPSILON;
+}
+
+function validateGenerationMultiviewManifest(manifest: EmbeddingGenerationManifest): void {
+	if (!isMultiviewGeneration(manifest)) {
+		throw new Error(`multiview generation write requires multiview generation: ${manifest.generation_id}`);
+	}
+	if (manifest.view_schema_version !== 1) throw new Error(`multiview view schema mismatch: ${manifest.generation_id}`);
+	if (manifest.document_policy_version !== MULTIVIEW_POLICY_VERSION) throw new Error(`multiview document policy mismatch: ${manifest.generation_id}`);
+	if (!manifest.multiview_policy) throw new Error(`multiview policy missing: ${manifest.generation_id}`);
+	if (manifest.aggregation_mode !== MULTIVIEW_AGGREGATION_MODE) throw new Error(`multiview aggregation mismatch: ${manifest.generation_id}`);
+	if (manifest.evidence_policy_id !== MULTIVIEW_EVIDENCE_POLICY_ID) throw new Error(`multiview evidence policy mismatch: ${manifest.generation_id}`);
+	if (manifest.retrieval_epoch !== MULTIVIEW_RETRIEVAL_EPOCH) throw new Error(`multiview retrieval epoch mismatch: ${manifest.generation_id}`);
+	if (manifest.document_recipe_id !== MULTIVIEW_DOCUMENT_RECIPE_ID || manifest.document_recipe_version !== MULTIVIEW_DOCUMENT_RECIPE_VERSION) {
+		throw new Error(`multiview document recipe mismatch: ${manifest.generation_id}`);
+	}
+}
+
+export interface MaterializedGenerationView {
+	view_id: string;
+	kind: "summary" | "evidence";
+	vector: number[];
+	input_hash: string;
+	tokens: Record<string, unknown>;
+	source_spans: EmbeddingSourceSpan[];
+	disclosure: EmbeddingViewDisclosure;
+}
+
+export interface GenerationValidationRow {
+	fragment_id: string;
+	source_content_hash: string;
+}
+
+export interface GenerationDiagnosticViewCounts {
+	total: number;
+	summary: number;
+	evidence: number;
+}
+
+export interface GenerationValidationResult {
+	generation_id: string;
+	representation_kind: "single" | "multiview";
+	valid: boolean;
+	failures: string[];
+	expected_count: number;
+	materialized_count: number;
+	failed_count: number;
+	searchable_coverage: number;
+	source_inventory_hash: string;
+	live_inventory_hash?: string;
+	view_counts?: GenerationDiagnosticViewCounts;
 }
 
 export function readGenerationManifest(generationId: string): EmbeddingGenerationManifest | null {
@@ -115,15 +295,23 @@ export function getActiveGeneration(): EmbeddingGenerationManifest | null {
 	return manifest;
 }
 
-export async function createGeneration(generationId: string, sourceInventoryHash: string, dimension = 384): Promise<EmbeddingGenerationManifest> {
+export async function createGeneration(generationId: string, sourceInventoryHash: string, dimension = 384, representationKind: "single" | "multiview" = "single"): Promise<EmbeddingGenerationManifest> {
 	if (readGenerationManifest(generationId)) throw new Error(`generation already exists: ${generationId}`);
 	const tokenizer = await getTokenizerManifest();
+	const isMultiview = representationKind === "multiview";
 	const manifest: EmbeddingGenerationManifest = {
-		manifest_schema_version: 1,
+		manifest_schema_version: 2,
 		generation_id: generationId,
 		state: "building",
-		document_recipe_id: DOCUMENT_RECIPE_ID,
-		document_recipe_version: DOCUMENT_RECIPE_VERSION,
+		representation_kind: representationKind,
+		document_policy_version: isMultiview ? MULTIVIEW_POLICY_VERSION : null,
+		multiview_policy: isMultiview ? DEFAULT_MULTIVIEW_POLICY : null,
+		view_schema_version: isMultiview ? 1 : null,
+		aggregation_mode: isMultiview ? MULTIVIEW_AGGREGATION_MODE : "fragment-single-vector-v1",
+		evidence_policy_id: isMultiview ? MULTIVIEW_EVIDENCE_POLICY_ID : null,
+		retrieval_epoch: isMultiview ? MULTIVIEW_RETRIEVAL_EPOCH : "fragment-single-vector-v1",
+		document_recipe_id: isMultiview ? MULTIVIEW_DOCUMENT_RECIPE_ID : DOCUMENT_RECIPE_ID,
+		document_recipe_version: isMultiview ? MULTIVIEW_DOCUMENT_RECIPE_VERSION : DOCUMENT_RECIPE_VERSION,
 		query_recipe_id: QUERY_RECIPE_ID,
 		query_recipe_version: QUERY_RECIPE_VERSION,
 		embedding_model_id: MODEL_ID,
@@ -147,6 +335,13 @@ export async function createGeneration(generationId: string, sourceInventoryHash
 		searchable_coverage: 0,
 	};
 	manifest.representation_identity_hash = hashBytes(canonicalJson({
+		representation_kind: manifest.representation_kind,
+		document_policy_version: manifest.document_policy_version,
+		multiview_policy: manifest.multiview_policy,
+		view_schema_version: manifest.view_schema_version,
+		aggregation_mode: manifest.aggregation_mode,
+		evidence_policy_id: manifest.evidence_policy_id,
+		retrieval_epoch: manifest.retrieval_epoch,
 		document_recipe_id: manifest.document_recipe_id,
 		document_recipe_version: manifest.document_recipe_version,
 		query_recipe_id: manifest.query_recipe_id,
@@ -178,6 +373,7 @@ export function writeGenerationVector(
 	vector: number[],
 	record: Omit<EmbeddingGenerationRecord, "fragment_id" | "generation_id" | "vector_hash" | "dimension" | "state">,
 ): EmbeddingGenerationRecord {
+	if (isMultiviewGeneration(manifest)) throw new Error(`single-view vector write is not allowed for multiview generation: ${manifest.generation_id}`);
 	if (manifest.state !== "building") throw new Error(`generation is not writable: ${manifest.generation_id}`);
 	if (vector.length !== manifest.dimension || vector.some((value) => !Number.isFinite(value))) {
 		throw new Error(`invalid vector for ${fragmentId}`);
@@ -197,6 +393,307 @@ export function writeGenerationVector(
 	index[fragmentId] = output;
 	atomicWrite(generationIndexPath(manifest.generation_id), `${JSON.stringify(index, null, 2)}\n`);
 	return output;
+}
+
+export function writeGenerationViews(
+	manifest: EmbeddingGenerationManifest,
+	fragmentId: string,
+	sourceHash: string,
+	views: MaterializedGenerationView[],
+): EmbeddingGenerationRecord {
+	validateGenerationMultiviewManifest(manifest);
+	if (manifest.state !== "building") throw new Error(`generation is not writable: ${manifest.generation_id}`);
+	if (!views.length) throw new Error(`multiview materialization requires views for ${fragmentId}`);
+	const summaryViews = views.filter((view) => view.kind === "summary");
+	if (summaryViews.length !== 1) throw new Error(`multiview materialization requires exactly one summary view for ${fragmentId}`);
+	const ids = new Set<string>();
+	const materialized: EmbeddingMaterializedView[] = [];
+	for (const view of views) {
+		if (!view.view_id || !/^[A-Za-z0-9._-]+$/.test(view.view_id)) throw new Error(`invalid multiview id: ${fragmentId}/${view.view_id}`);
+		if (ids.has(view.view_id)) throw new Error(`duplicate multiview id: ${fragmentId}/${view.view_id}`);
+		ids.add(view.view_id);
+		if (view.vector.length !== manifest.dimension || view.vector.some((value) => !Number.isFinite(value))) {
+			throw new Error(`invalid multiview vector: ${fragmentId}/${view.view_id}`);
+		}
+		const bytes = JSON.stringify(view.vector);
+		materialized.push({
+			view_id: view.view_id,
+			kind: view.kind,
+			input_hash: view.input_hash,
+			vector_hash: hashBytes(bytes),
+			vector_dimension: view.vector.length,
+			tokens: view.tokens,
+			source_spans: view.source_spans,
+			disclosure: view.disclosure,
+		});
+	}
+	const summary = summaryViews[0];
+	const summaryBytes = JSON.stringify(summary.vector);
+	const sidecar = {
+		view_schema_version: 1,
+		fragment_id: fragmentId,
+		source_content_hash: sourceHash,
+		views: Object.fromEntries(views.map((view) => [view.view_id, view.vector])),
+	};
+	const record: EmbeddingGenerationRecord = {
+		fragment_id: fragmentId,
+		generation_id: manifest.generation_id,
+		view_id: summary.view_id,
+		view_kind: summary.kind,
+		source_spans: summary.source_spans,
+		disclosure: summary.disclosure,
+		views: materialized,
+		view_set_hash: viewSetHash(materialized),
+		source_content_hash: sourceHash,
+		input_hash: summary.input_hash,
+		vector_hash: hashBytes(summaryBytes),
+		dimension: summary.vector.length,
+		tokens: summary.tokens,
+		state: "materialized",
+	};
+	const nextIndex = { ...readGenerationIndex(manifest.generation_id), [fragmentId]: record };
+	commitGenerationFragmentFiles(manifest.generation_id, fragmentId, [
+		{ livePath: generationMultiviewSidecarPath(manifest.generation_id, fragmentId), content: `${JSON.stringify(sidecar, null, 2)}\n` },
+		{ livePath: generationVectorPath(manifest.generation_id, fragmentId), content: summaryBytes },
+		{ livePath: generationIndexPath(manifest.generation_id), content: `${JSON.stringify(nextIndex, null, 2)}\n` },
+	]);
+	return record;
+}
+
+export function readGenerationMultiviewViews(
+	generationId: string,
+	fragmentId: string,
+	record: EmbeddingGenerationRecord | undefined,
+	dimension: number,
+): EffectiveMultiviewView[] | null {
+	if (!record || record.state !== "materialized" || !record.views?.length) return null;
+	if (record.views.filter((view) => view.kind === "summary").length !== 1) return null;
+	if (record.view_kind !== "summary" || !record.view_id) return null;
+	if (record.dimension !== dimension) return null;
+	if (record.view_set_hash !== viewSetHash(record.views)) return null;
+	const summaryVector = readJsonVector(generationVectorPath(generationId, fragmentId));
+	if (!summaryVector || summaryVector.length !== dimension) return null;
+	if (!fs.existsSync(generationMultiviewSidecarPath(generationId, fragmentId))) return null;
+	try {
+		const sidecar = JSON.parse(fs.readFileSync(generationMultiviewSidecarPath(generationId, fragmentId), "utf8")) as {
+			view_schema_version?: number;
+			fragment_id?: string;
+			source_content_hash?: string;
+			views?: Record<string, unknown>;
+		};
+		if (sidecar.view_schema_version !== 1 || sidecar.fragment_id !== fragmentId || sidecar.source_content_hash !== record.source_content_hash || !sidecar.views) return null;
+		const viewIds = record.views.map((view) => view.view_id).sort();
+		const sidecarIds = Object.keys(sidecar.views).sort();
+		if (JSON.stringify(viewIds) !== JSON.stringify(sidecarIds)) return null;
+		const result: EffectiveMultiviewView[] = [];
+		for (const view of record.views) {
+			const vector = sidecar.views[view.view_id];
+			if (!Array.isArray(vector) || vector.length !== dimension || vector.some((item) => typeof item !== "number" || !Number.isFinite(item))) return null;
+			const vectorHash = hashBytes(JSON.stringify(vector));
+			if (vectorHash !== view.vector_hash || view.vector_dimension !== dimension) return null;
+			if (view.kind === "summary") {
+				if (
+					view.view_id !== record.view_id ||
+					record.input_hash !== view.input_hash ||
+					record.vector_hash !== view.vector_hash ||
+					JSON.stringify(vector) !== JSON.stringify(summaryVector) ||
+					canonicalJson(view.source_spans) !== canonicalJson(record.source_spans) ||
+					canonicalJson(view.disclosure) !== canonicalJson(record.disclosure) ||
+					canonicalJson(view.tokens) !== canonicalJson(record.tokens)
+				) return null;
+			}
+			result.push({
+				fragment_id: fragmentId,
+				view_id: view.view_id,
+				kind: view.kind,
+				vector,
+				input_hash: view.input_hash,
+				vector_hash: view.vector_hash,
+				vector_dimension: view.vector_dimension,
+				source_spans: view.source_spans,
+				disclosure: view.disclosure,
+			});
+		}
+		return result;
+	} catch {
+		return null;
+	}
+}
+
+export function validateGenerationRecords(
+	manifest: EmbeddingGenerationManifest,
+	index: Record<string, EmbeddingGenerationRecord>,
+	rows: GenerationValidationRow[],
+	liveInventoryHash?: string,
+): GenerationValidationResult {
+	const failures: string[] = [];
+	const kind = representationKind(manifest);
+	const expectedCount = rows.length;
+	const materializedCount = Object.values(index).filter((record) => record.state === "materialized").length;
+	const failedCount = Object.values(index).filter((record) => record.state === "failed").length;
+	const searchableCoverage = expectedCount === 0 ? 0 : materializedCount / expectedCount;
+	const viewCounts: GenerationDiagnosticViewCounts = { total: 0, summary: 0, evidence: 0 };
+	const rowsByFragment = new Map<string, GenerationValidationRow>();
+
+	if (manifest.state !== "ready" && manifest.state !== "active") {
+		failures.push(`generation state must be ready or active: ${manifest.state}`);
+	}
+	if (liveInventoryHash !== undefined && manifest.source_inventory_hash !== liveInventoryHash) {
+		failures.push(
+			`source inventory hash mismatch: manifest=${manifest.source_inventory_hash} live=${liveInventoryHash}`,
+		);
+	}
+	if (manifest.expected_count !== expectedCount) {
+		failures.push(`expected_count mismatch: manifest=${manifest.expected_count} actual=${expectedCount}`);
+	}
+	if (manifest.materialized_count !== materializedCount) {
+		failures.push(
+			`materialized_count mismatch: manifest=${manifest.materialized_count} actual=${materializedCount}`,
+		);
+	}
+	if (manifest.failed_count !== failedCount) {
+		failures.push(`failed_count mismatch: manifest=${manifest.failed_count} actual=${failedCount}`);
+	}
+	if (!coverageEquals(manifest.searchable_coverage, searchableCoverage)) {
+		failures.push(
+			`searchable_coverage mismatch: manifest=${manifest.searchable_coverage} actual=${searchableCoverage}`,
+		);
+	}
+	if (kind === "multiview") {
+		try {
+			validateGenerationMultiviewManifest(manifest);
+		} catch (error) {
+			failures.push(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	for (const row of rows) {
+		if (rowsByFragment.has(row.fragment_id)) {
+			failures.push(`duplicate validation row for fragment: ${row.fragment_id}`);
+			continue;
+		}
+		rowsByFragment.set(row.fragment_id, row);
+	}
+
+	for (const fragmentId of Object.keys(index)) {
+		if (!rowsByFragment.has(fragmentId)) {
+			failures.push(`generation record has no matching source row: ${fragmentId}`);
+		}
+	}
+
+	for (const row of rows) {
+		const record = index[row.fragment_id];
+		if (!record) {
+			failures.push(`missing generation record for fragment: ${row.fragment_id}`);
+			continue;
+		}
+		if (record.fragment_id !== row.fragment_id) {
+			failures.push(`record fragment id mismatch for ${row.fragment_id}: record=${record.fragment_id}`);
+		}
+		if (record.generation_id !== manifest.generation_id) {
+			failures.push(
+				`record generation id mismatch for ${row.fragment_id}: record=${record.generation_id} manifest=${manifest.generation_id}`,
+			);
+		}
+		if (record.source_content_hash !== row.source_content_hash) {
+			failures.push(
+				`source content hash mismatch for ${row.fragment_id}: record=${record.source_content_hash} source=${row.source_content_hash}`,
+			);
+		}
+		if (record.state !== "materialized") {
+			failures.push(`generation record is not materialized for ${row.fragment_id}: ${record.state}`);
+			continue;
+		}
+		if (record.dimension !== manifest.dimension) {
+			failures.push(
+				`record dimension mismatch for ${row.fragment_id}: record=${record.dimension} manifest=${manifest.dimension}`,
+			);
+		}
+		if (kind === "multiview") {
+			const views = readGenerationMultiviewViews(manifest.generation_id, row.fragment_id, record, manifest.dimension);
+			if (!views) {
+				failures.push(`multiview payload is missing or corrupt for ${row.fragment_id}`);
+				continue;
+			}
+			for (const view of views) {
+				viewCounts.total += 1;
+				if (view.kind === "summary") viewCounts.summary += 1;
+				if (view.kind === "evidence") viewCounts.evidence += 1;
+			}
+			continue;
+		}
+		const vectorPath = generationVectorPath(manifest.generation_id, row.fragment_id);
+		if (!fs.existsSync(vectorPath)) {
+			failures.push(`vector file is missing for ${row.fragment_id}`);
+			continue;
+		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(fs.readFileSync(vectorPath, "utf8"));
+		} catch {
+			failures.push(`vector file is not valid JSON for ${row.fragment_id}`);
+			continue;
+		}
+		if (!Array.isArray(parsed)) {
+			failures.push(`vector file is not an array for ${row.fragment_id}`);
+			continue;
+		}
+		if (parsed.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
+			failures.push(`vector contains non-finite values for ${row.fragment_id}`);
+			continue;
+		}
+		if (parsed.length !== manifest.dimension || parsed.length !== record.dimension) {
+			failures.push(
+				`vector dimension mismatch for ${row.fragment_id}: file=${parsed.length} record=${record.dimension} manifest=${manifest.dimension}`,
+			);
+			continue;
+		}
+		const vectorHash = hashBytes(JSON.stringify(parsed));
+		if (vectorHash !== record.vector_hash) {
+			failures.push(`vector hash mismatch for ${row.fragment_id}: record=${record.vector_hash} file=${vectorHash}`);
+		}
+	}
+
+	return {
+		generation_id: manifest.generation_id,
+		representation_kind: kind,
+		valid: failures.length === 0,
+		failures,
+		expected_count: expectedCount,
+		materialized_count: materializedCount,
+		failed_count: failedCount,
+		searchable_coverage: searchableCoverage,
+		source_inventory_hash: manifest.source_inventory_hash,
+		...(liveInventoryHash !== undefined ? { live_inventory_hash: liveInventoryHash } : {}),
+		...(kind === "multiview" ? { view_counts: viewCounts } : {}),
+	};
+}
+
+export function assertGenerationReadyForActivation(
+	manifest: EmbeddingGenerationManifest,
+	validation: GenerationValidationResult,
+): void {
+	if (manifest.state !== "ready" && manifest.state !== "active") {
+		throw new Error(`generation is not ready for activation: ${manifest.generation_id} state=${manifest.state}`);
+	}
+	if (validation.failed_count !== 0) {
+		throw new Error(`generation has failed records: ${manifest.generation_id} failed_count=${validation.failed_count}`);
+	}
+	if (validation.materialized_count !== validation.expected_count) {
+		throw new Error(
+			`generation is not fully materialized: ${manifest.generation_id} materialized=${validation.materialized_count} expected=${validation.expected_count}`,
+		);
+	}
+	if (!coverageEquals(validation.searchable_coverage, 1)) {
+		throw new Error(
+			`generation does not have full searchable coverage: ${manifest.generation_id} coverage=${validation.searchable_coverage}`,
+		);
+	}
+	if (!validation.valid) {
+		throw new Error(
+			`generation validation failed for activation: ${manifest.generation_id} ${validation.failures.join("; ")}`,
+		);
+	}
 }
 
 export function setGenerationExpectedCount(generationId: string, expectedCount: number): EmbeddingGenerationManifest {
@@ -232,6 +729,19 @@ export function activateGeneration(generationId: string): ActiveEmbeddingPointer
 	const manifest = readGenerationManifest(generationId);
 	if (!manifest || (manifest.state !== "ready" && manifest.state !== "active")) {
 		throw new Error(`generation is not activatable: ${generationId}`);
+	}
+	if (manifest.failed_count !== 0) {
+		throw new Error(`generation has failed records and cannot be activated: ${generationId}`);
+	}
+	if (manifest.expected_count > 0 && manifest.materialized_count !== manifest.expected_count) {
+		throw new Error(
+			`generation is not fully materialized and cannot be activated: ${generationId} materialized=${manifest.materialized_count} expected=${manifest.expected_count}`,
+		);
+	}
+	if (manifest.expected_count > 0 && !coverageEquals(manifest.searchable_coverage, 1)) {
+		throw new Error(
+			`generation does not have full searchable coverage and cannot be activated: ${generationId} coverage=${manifest.searchable_coverage}`,
+		);
 	}
 	const current = readActivePointer();
 	const activeManifest = { ...manifest, state: "active" as const };
