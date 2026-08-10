@@ -11,6 +11,8 @@ export interface EvidenceCalibrationArtifact {
 	calibration_scope: EvidencePolicyScope;
 	calibration_scope_hash: string;
 	evidence_threshold: number;
+	/** 渐进式披露（方案 B）：可选披露门下限；不参与 scope hash。 */
+	disclosure_threshold?: number;
 	raw_similarity_mode: "fragment-max-view-v1";
 	development: { dataset_id: string; dataset_hash: string };
 	holdout: { dataset_id: string; dataset_hash: string };
@@ -122,6 +124,10 @@ export function readValidatedEvidencePolicy(filePath: string, expectedScope: Evi
 		calibration_scope_hash: artifact.calibration_scope_hash,
 		calibration_artifact_hash: artifact.artifact_hash,
 		evidence_threshold: artifact.evidence_threshold,
+		// 渐进式披露（方案 B）：可选披露门下限；artifact 未携带时检索侧用自适应式默认。
+		...(artifact.disclosure_threshold !== undefined && Number.isFinite(artifact.disclosure_threshold)
+			? { disclosure_threshold: artifact.disclosure_threshold as number }
+			: {}),
 		raw_similarity_mode: artifact.raw_similarity_mode,
 		development_dataset_hash: artifact.development.dataset_hash,
 		holdout_dataset_hash: artifact.holdout.dataset_hash,

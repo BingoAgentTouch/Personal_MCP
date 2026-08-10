@@ -148,6 +148,26 @@ node bench/run-multiview-eval.mjs evaluate \
 
 本项目采用简单、手动维护优先的落地策略，不把大规模生产级 calibration、长时间 shadow observation 或复杂自动运维作为首次启用的前置条件。真实库首次启用时只需在维护窗口完成 multiview build → validate → switch，保留旧 generation，并用少量真实查询做 sanity check；必要时手动回切旧 generation。fixture artifact 不能冒充真实生产阈值，但不再阻塞首次使用。
 
+## Compaction 日常维护流程（手动维护）
+
+日常写入走 **delta 增量层**（generation 是不可变快照，写入只更新 `memory/embedding_delta/`）。delta 条目数 D 增长后：① 每次 `create_fragment` 重写 `delta_index.json` 的写放大 ≈ O(D²)；② 检索多一层校验。**compaction** 把 base + delta 合并进一个全新 generation 并清空 delta（两层变一层）。
+
+**什么时候做**：delta 条目数（`memory/embedding_delta/delta_index.json` 的键数）≥ 100~300、`create_fragment`/`memory_search` 明显变慢、或按使用强度定期（如每月/每 200 片段）。**全程在维护窗口执行，先备份 memory 根**。
+
+```bash
+cd <记忆库所在的项目根>          # 存储根相对 CWD，必须
+node <绝对路径>/compact_embeddings.mjs preflight --generation gen_YYYYMMDD_compaction --representation multiview --evidence-policy <validated-artifact.json>
+node <绝对路径>/compact_embeddings.mjs build --generation gen_YYYYMMDD_compaction
+node <绝对路径>/compact_embeddings.mjs validate --generation gen_YYYYMMDD_compaction
+node <绝对路径>/compact_embeddings.mjs switch --generation gen_YYYYMMDD_compaction
+```
+
+- `--representation` 必须与当前 active generation 一致；multiview 时必须携带 **validated** evidence policy（`run-multiview-eval.mjs validate` 产出，candidate 不可用）。
+- preflight 会**上 compaction 锁 + 封存 delta + 写 merge contract**；validate 不通过**不得 switch**；异常中断先用 `compact_embeddings.mjs unlock` 确认解锁，不要把 unlock 当通用恢复手段。
+- switch 后旧 generation 保留在 `previous_generation_id`，可手动回切。
+- 换模型/换表示请用 `migrate_embeddings.mjs`，不要用 compaction 顶替。
+- 详细判定信号、故障处理与操作前检查清单见《项目维护/memory-mcp-server_compaction维护手册_20260809.md》；archive 恢复场景见下一节。
+
 ## Compaction archive recovery（维护者手动流程）
 
 此流程只用于恢复一个 **C3-3B v2 compaction archive**：把 archive 中的 sealed delta 和记录的 base active pointer 原样恢复。它不是通用 JSON 修复、`migrate_embeddings.mjs` 的 rollback、orphan reconcile，也不是面向日常用户的操作。

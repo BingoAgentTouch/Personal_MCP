@@ -1,0 +1,381 @@
+{
+  "report_schema_version": 1,
+  "report_type": "multiview-development-calibration",
+  "development": {
+    "dataset_id": "multiview-development-v2",
+    "dataset_hash": "sha256:9b227b010bfab944790e7d23957b7fc9e01ab20a4095b3a9d30300997244923a"
+  },
+  "dataset_id": "multiview-development-v2",
+  "dataset_hash": "sha256:9b227b010bfab944790e7d23957b7fc9e01ab20a4095b3a9d30300997244923a",
+  "scope": {
+    "model_id": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+    "tokenizer_id": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+    "document_recipe_id": "fragment-multiview-budgeted",
+    "document_recipe_version": 1,
+    "multiview_policy": {
+      "evidence_window_tokens": 288,
+      "evidence_overlap_tokens": 48,
+      "disclosure_snippet_tokens": 80
+    },
+    "aggregation_mode": "fragment-max-view-v1",
+    "raw_similarity_mode": "fragment-max-view-v1"
+  },
+  "scope_hash": "sha256:75668c43d0863fd64b3c608b576b026e9e1fdbc2c07aecad7cb06fd312ceab25",
+  "objectives": {
+    "max_fpr": 1,
+    "min_evidence_recall": 0
+  },
+  "candidate_count": 20,
+  "selected": {
+    "threshold": 0.33,
+    "evaluation": {
+      "threshold": 0.33,
+      "top_k": 3,
+      "rows": [
+        {
+          "case_id": "dev-middle-chinese",
+          "evidence_expected": true,
+          "placement": "middle",
+          "rank": 1,
+          "summary_rank": 2,
+          "single_rank": 2,
+          "evidence_score": 0.93,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_001",
+          "summary_top_fragment_id": "fixture/dev_noise",
+          "single_top_fragment_id": "fixture/dev_noise"
+        },
+        {
+          "case_id": "dev-boundary-identifier",
+          "evidence_expected": true,
+          "placement": "near_boundary",
+          "rank": 1,
+          "summary_rank": 2,
+          "single_rank": 2,
+          "evidence_score": 0.87,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_002",
+          "summary_top_fragment_id": "fixture/dev_noise",
+          "single_top_fragment_id": "fixture/dev_noise"
+        },
+        {
+          "case_id": "dev-tail-number",
+          "evidence_expected": true,
+          "placement": "tail",
+          "rank": 1,
+          "summary_rank": 2,
+          "single_rank": 2,
+          "evidence_score": 0.81,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_003",
+          "summary_top_fragment_id": "fixture/dev_noise",
+          "single_top_fragment_id": "fixture/dev_noise"
+        },
+        {
+          "case_id": "dev-summary-only",
+          "evidence_expected": false,
+          "placement": "absent",
+          "rank": 1,
+          "summary_rank": 1,
+          "single_rank": 1,
+          "evidence_score": 0.55,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_004",
+          "summary_top_fragment_id": "fixture/dev_004",
+          "single_top_fragment_id": "fixture/dev_004"
+        },
+        {
+          "case_id": "dev-adversarial-path",
+          "evidence_expected": false,
+          "placement": "absent",
+          "rank": 1,
+          "summary_rank": 1,
+          "single_rank": 1,
+          "evidence_score": 0.58,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_005",
+          "summary_top_fragment_id": "fixture/dev_005",
+          "single_top_fragment_id": "fixture/dev_005"
+        },
+        {
+          "case_id": "dev-low-052",
+          "evidence_expected": true,
+          "placement": "middle",
+          "rank": 1,
+          "summary_rank": 2,
+          "single_rank": 2,
+          "evidence_score": 0.52,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_low001",
+          "summary_top_fragment_id": "fixture/noise_low",
+          "single_top_fragment_id": "fixture/noise_low"
+        },
+        {
+          "case_id": "dev-low-060",
+          "evidence_expected": true,
+          "placement": "middle",
+          "rank": 1,
+          "summary_rank": 2,
+          "single_rank": 2,
+          "evidence_score": 0.6,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_low002",
+          "summary_top_fragment_id": "fixture/noise_low",
+          "single_top_fragment_id": "fixture/noise_low"
+        },
+        {
+          "case_id": "dev-low-068",
+          "evidence_expected": true,
+          "placement": "middle",
+          "rank": 1,
+          "summary_rank": 2,
+          "single_rank": 2,
+          "evidence_score": 0.68,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_low003",
+          "summary_top_fragment_id": "fixture/noise_low",
+          "single_top_fragment_id": "fixture/noise_low"
+        },
+        {
+          "case_id": "dev-low-075",
+          "evidence_expected": true,
+          "placement": "middle",
+          "rank": 1,
+          "summary_rank": 2,
+          "single_rank": 2,
+          "evidence_score": 0.75,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_low004",
+          "summary_top_fragment_id": "fixture/noise_low",
+          "single_top_fragment_id": "fixture/noise_low"
+        },
+        {
+          "case_id": "dev-low-079",
+          "evidence_expected": true,
+          "placement": "middle",
+          "rank": 1,
+          "summary_rank": 2,
+          "single_rank": 2,
+          "evidence_score": 0.79,
+          "evidence_passed": true,
+          "calibrated_top_fragment_id": "fixture/dev_low005",
+          "summary_top_fragment_id": "fixture/noise_low",
+          "single_top_fragment_id": "fixture/noise_low"
+        }
+      ],
+      "retrieval": {
+        "query_count": 10,
+        "hit_count": 10,
+        "recall_at_k": 1,
+        "mrr": 1,
+        "all_required_hit_at_k": 1
+      },
+      "gate": {
+        "positive_count": 8,
+        "negative_count": 2,
+        "true_positive": 8,
+        "false_negative": 0,
+        "false_positive": 2,
+        "true_negative": 0,
+        "evidence_recall": 1,
+        "fpr": 1,
+        "tnr": 0,
+        "precision": 0.8
+      },
+      "duplicate_fragment_rate": 0,
+      "vector_count": 40,
+      "storage_vector_units": 40
+    }
+  },
+  "candidate_artifact": {
+    "artifact_schema_version": 1,
+    "artifact_type": "multiview-evidence-gate-policy",
+    "status": "candidate",
+    "policy_id": "evidence-gate-75668c43d086-0_33",
+    "calibration_scope": {
+      "model_id": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+      "tokenizer_id": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+      "document_recipe_id": "fragment-multiview-budgeted",
+      "document_recipe_version": 1,
+      "multiview_policy": {
+        "evidence_window_tokens": 288,
+        "evidence_overlap_tokens": 48,
+        "disclosure_snippet_tokens": 80
+      },
+      "aggregation_mode": "fragment-max-view-v1",
+      "raw_similarity_mode": "fragment-max-view-v1"
+    },
+    "calibration_scope_hash": "sha256:75668c43d0863fd64b3c608b576b026e9e1fdbc2c07aecad7cb06fd312ceab25",
+    "evidence_threshold": 0.33,
+    "raw_similarity_mode": "fragment-max-view-v1",
+    "development": {
+      "dataset_id": "multiview-development-v2",
+      "dataset_hash": "sha256:9b227b010bfab944790e7d23957b7fc9e01ab20a4095b3a9d30300997244923a",
+      "metrics": {
+        "threshold": 0.33,
+        "top_k": 3,
+        "rows": [
+          {
+            "case_id": "dev-middle-chinese",
+            "evidence_expected": true,
+            "placement": "middle",
+            "rank": 1,
+            "summary_rank": 2,
+            "single_rank": 2,
+            "evidence_score": 0.93,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_001",
+            "summary_top_fragment_id": "fixture/dev_noise",
+            "single_top_fragment_id": "fixture/dev_noise"
+          },
+          {
+            "case_id": "dev-boundary-identifier",
+            "evidence_expected": true,
+            "placement": "near_boundary",
+            "rank": 1,
+            "summary_rank": 2,
+            "single_rank": 2,
+            "evidence_score": 0.87,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_002",
+            "summary_top_fragment_id": "fixture/dev_noise",
+            "single_top_fragment_id": "fixture/dev_noise"
+          },
+          {
+            "case_id": "dev-tail-number",
+            "evidence_expected": true,
+            "placement": "tail",
+            "rank": 1,
+            "summary_rank": 2,
+            "single_rank": 2,
+            "evidence_score": 0.81,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_003",
+            "summary_top_fragment_id": "fixture/dev_noise",
+            "single_top_fragment_id": "fixture/dev_noise"
+          },
+          {
+            "case_id": "dev-summary-only",
+            "evidence_expected": false,
+            "placement": "absent",
+            "rank": 1,
+            "summary_rank": 1,
+            "single_rank": 1,
+            "evidence_score": 0.55,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_004",
+            "summary_top_fragment_id": "fixture/dev_004",
+            "single_top_fragment_id": "fixture/dev_004"
+          },
+          {
+            "case_id": "dev-adversarial-path",
+            "evidence_expected": false,
+            "placement": "absent",
+            "rank": 1,
+            "summary_rank": 1,
+            "single_rank": 1,
+            "evidence_score": 0.58,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_005",
+            "summary_top_fragment_id": "fixture/dev_005",
+            "single_top_fragment_id": "fixture/dev_005"
+          },
+          {
+            "case_id": "dev-low-052",
+            "evidence_expected": true,
+            "placement": "middle",
+            "rank": 1,
+            "summary_rank": 2,
+            "single_rank": 2,
+            "evidence_score": 0.52,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_low001",
+            "summary_top_fragment_id": "fixture/noise_low",
+            "single_top_fragment_id": "fixture/noise_low"
+          },
+          {
+            "case_id": "dev-low-060",
+            "evidence_expected": true,
+            "placement": "middle",
+            "rank": 1,
+            "summary_rank": 2,
+            "single_rank": 2,
+            "evidence_score": 0.6,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_low002",
+            "summary_top_fragment_id": "fixture/noise_low",
+            "single_top_fragment_id": "fixture/noise_low"
+          },
+          {
+            "case_id": "dev-low-068",
+            "evidence_expected": true,
+            "placement": "middle",
+            "rank": 1,
+            "summary_rank": 2,
+            "single_rank": 2,
+            "evidence_score": 0.68,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_low003",
+            "summary_top_fragment_id": "fixture/noise_low",
+            "single_top_fragment_id": "fixture/noise_low"
+          },
+          {
+            "case_id": "dev-low-075",
+            "evidence_expected": true,
+            "placement": "middle",
+            "rank": 1,
+            "summary_rank": 2,
+            "single_rank": 2,
+            "evidence_score": 0.75,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_low004",
+            "summary_top_fragment_id": "fixture/noise_low",
+            "single_top_fragment_id": "fixture/noise_low"
+          },
+          {
+            "case_id": "dev-low-079",
+            "evidence_expected": true,
+            "placement": "middle",
+            "rank": 1,
+            "summary_rank": 2,
+            "single_rank": 2,
+            "evidence_score": 0.79,
+            "evidence_passed": true,
+            "calibrated_top_fragment_id": "fixture/dev_low005",
+            "summary_top_fragment_id": "fixture/noise_low",
+            "single_top_fragment_id": "fixture/noise_low"
+          }
+        ],
+        "retrieval": {
+          "query_count": 10,
+          "hit_count": 10,
+          "recall_at_k": 1,
+          "mrr": 1,
+          "all_required_hit_at_k": 1
+        },
+        "gate": {
+          "positive_count": 8,
+          "negative_count": 2,
+          "true_positive": 8,
+          "false_negative": 0,
+          "false_positive": 2,
+          "true_negative": 0,
+          "evidence_recall": 1,
+          "fpr": 1,
+          "tnr": 0,
+          "precision": 0.8
+        },
+        "duplicate_fragment_rate": 0,
+        "vector_count": 40,
+        "storage_vector_units": 40
+      }
+    },
+    "holdout": null,
+    "objectives": {
+      "max_fpr": 1,
+      "min_evidence_recall": 0
+    },
+    "artifact_hash": "sha256:12d34e10492e2f65b2dd8ddca59c64d7a04e9c726008768ac335a6f1612424e9"
+  },
+  "decision": "candidate"
+}

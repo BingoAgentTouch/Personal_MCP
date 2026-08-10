@@ -98,6 +98,8 @@ export interface EvidenceGatePolicySnapshot {
 	calibration_scope_hash: string;
 	calibration_artifact_hash: string;
 	evidence_threshold: number;
+	/** 渐进式披露（方案 B）：披露门下限；缺省时用自适应式 max(0.5, 0.8×summary)。不进 scope hash（只改呈现不改表示）。 */
+	disclosure_threshold?: number;
 	raw_similarity_mode: "fragment-max-view-v1";
 	development_dataset_hash: string;
 	holdout_dataset_hash: string;
@@ -313,6 +315,8 @@ export interface SearchResultItem {
 	matched_source_range: EmbeddingSourceSpan | null;
 	matched_snippet: string | null;
 	snippet_anchor: SearchSnippetAnchor;
+	/** 渐进式披露（方案 B）：未过竞争门但过披露门的证据存在性提示；仅进入结果的片段携带，每查询上限见配置。 */
+	evidence_hint?: EvidenceHint;
 	generation_id: string | null;
 	representation_identity_hash: string | null;
 	retrieval_epoch: string | null;
@@ -329,6 +333,18 @@ export interface SearchResults {
 	query: string;
 	results: SearchResultItem[];
 	health?: EmbeddingHealthSnapshot;
+}
+
+/** 渐进式披露（方案 B）的低置信证据提示：告知 LLM 片段中段可能存在与查询相关的内容。 */
+export interface EvidenceHint {
+	/** 该片段最佳 evidence 视图与 query 的 cosine 分数（未过竞争门但过披露门）。 */
+	score: number;
+	/** 证据视图覆盖的原文范围（turns 或字符 span 的人类可读表示）。 */
+	source_range: string;
+	/** 证据中段预览（复用视图自带 disclosure snippet，无新增 I/O）。 */
+	snippet: string;
+	/** 命中的 evidence 视图 ID（便于调试与未来 view 级联想）。 */
+	view_id: string;
 }
 
 // ============================================================

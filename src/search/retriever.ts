@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import type {
 	EmbeddingLayer,
 	EmbeddingSourceSpan,
+	EvidenceHint,
 	FragmentWeightMeta,
 	RawSimilarityMode,
 	SearchResultItem,
@@ -47,6 +48,17 @@ export function effectiveImportance(meta: Pick<FragmentWeightMeta, "importance" 
 
 /** A multiview evidence score affects ranking only through a validated policy snapshot. */
 export const MULTIVIEW_CANDIDATE_POOL_MULTIPLIER = 3;
+
+/** 渐进式披露（方案 B，B4）：每查询 evidence_hint 数量上限（按分数降序保留）。 */
+export const MAX_EVIDENCE_HINTS_PER_QUERY = 2;
+
+const round4 = (n: number) => Math.round(n * 10000) / 10000;
+
+/** 渐进式披露（方案 B）：把证据视图覆盖的原文范围格式化为人类可读表示。 */
+function formatSourceRange(spans: EmbeddingSourceSpan[] | undefined): string {
+	if (!spans || spans.length === 0) return "unknown";
+	return spans.map((s) => `${s.source_field}[${s.start_char}-${s.end_char}]`).join(",");
+}
 
 type LoadedVector = { vector: number[]; layer: EmbeddingLayer };
 type LoadedMultiview = { views: EffectiveMultiviewView[]; layer: EmbeddingLayer };
@@ -119,6 +131,8 @@ interface ScoredFragment {
 	layer: EmbeddingLayer;
 	matchedView?: EffectiveMultiviewView;
 	rawSimilarityMode: RawSimilarityMode;
+	/** 渐进式披露（方案 B）：未过竞争门但过披露门的证据存在性提示。 */
+	evidenceHint?: EvidenceHint;
 }
 
 function chooseBestView(current: { score: number; view: EffectiveMultiviewView } | null, candidate: { score: number; view: EffectiveMultiviewView }): { score: number; view: EffectiveMultiviewView } {
@@ -223,9 +237,15 @@ function weightAndRerank(
 	});
 	weighted.sort((a, b) => b.final - a.final || b.rawSimilarity - a.rawSimilarity || a.id.localeCompare(b.id));
 	const results: SearchResultItem[] = [];
+	let hintCount = 0;
 	for (const w of weighted.slice(0, topK)) {
 		const item = buildResultItem(w, baseGenerationId, deltaId, identity, query);
-		if (item) results.push(item);
+		if (!item) continue;
+		if (item.evidence_hint) {
+			if (hintCount >= MAX_EVIDENCE_HINTS_PER_QUERY) delete item.evidence_hint;
+			else hintCount++;
+		}
+		results.push(item);
 	}
 	return results;
 }
@@ -256,12 +276,27 @@ function aggregateMultiview(
 		const evidencePassed = Boolean(evidenceAllowed && evidence && evidence.score >= policy.evidence_threshold);
 		const winner = evidencePassed && evidence && (!summary || evidence.score >= summary.score) ? evidence : summary;
 		if (!winner || winner.score <= 0) continue;
+		// 渐进式披露（方案 B）：未过竞争门但过披露门（自适应 max(下限, 0.8×summary)）→ 构造存在性提示。
+		let evidenceHint: EvidenceHint | undefined;
+		if (!evidencePassed && evidenceAllowed && evidence && policy) {
+			const floor = Number.isFinite(policy.disclosure_threshold) ? (policy.disclosure_threshold as number) : 0.5;
+			const disclosureThreshold = Math.max(floor, 0.8 * (summary ? summary.score : 0));
+			if (evidence.score >= disclosureThreshold) {
+				evidenceHint = {
+					score: round4(evidence.score),
+					source_range: formatSourceRange(evidence.view.source_spans),
+					snippet: evidence.view.disclosure?.snippet ?? "",
+					view_id: evidence.view.view_id,
+				};
+			}
+		}
 		scored.push({
 			id: fragmentId,
 			rawSimilarity: winner.score,
 			layer: entry.layer,
 			matchedView: winner.view,
 			rawSimilarityMode: evidencePassed ? "fragment-max-view-v1" : "fragment-summary-only-shadow-v1",
+			...(evidenceHint ? { evidenceHint } : {}),
 		});
 	}
 	return weightAndRerank(scored, topK, baseGenerationId, deltaId, identity, query, MULTIVIEW_CANDIDATE_POOL_MULTIPLIER);
@@ -297,7 +332,6 @@ function buildResultItem(
 	let topicSummary: string | null = null;
 	if (topic) topicSummary = topic.entries.map((e) => `${e.date}：${e.summary}`).join("；");
 	const disclosure = viewDisclosure(query, frag, scored.matchedView);
-	const round4 = (n: number) => Math.round(n * 10000) / 10000;
 	return {
 		fragment_id: frag.fragment_id,
 		score: round4(scored.rawSimilarity * scored.weight),
@@ -316,6 +350,7 @@ function buildResultItem(
 		matched_source_range: disclosure.matchedSourceRange,
 		matched_snippet: disclosure.matchedSnippet,
 		snippet_anchor: disclosure.snippetAnchor,
+		...(scored.evidenceHint ? { evidence_hint: scored.evidenceHint } : {}),
 		generation_id: identity.generationId,
 		representation_identity_hash: identity.representationIdentityHash,
 		retrieval_epoch: identity.retrievalEpoch,
