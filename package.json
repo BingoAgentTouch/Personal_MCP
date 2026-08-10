@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "watch": "tsx src/watcher.ts",
+    "watch": "tsx src/watcher/cli.ts",
+    "backfill": "tsx src/watcher/cli.ts",
     "check": "tsc --noEmit",
     "build": "tsc",
     "start": "node dist/index.js",
+    "multiview:eval": "node bench/run-multiview-eval.mjs",
     "test": "node --import tsx --test test/**/*.test.ts"
   },
   "dependencies": {

@@ -11,6 +11,7 @@ const memoryRoot = path.join(tempRoot, "memory");
 const fragmentDir = path.join(memoryRoot, "fragments", "2026-08-03");
 const migrateRunner = path.join(projectRoot, "migrate_embeddings.mjs");
 const compactRunner = path.join(projectRoot, "compact_embeddings.mjs");
+const { writeValidatedEvidenceArtifact } = await import("./evidence-policy-fixture.ts");
 
 before(() => {
 	fs.mkdirSync(fragmentDir, { recursive: true });
@@ -23,9 +24,10 @@ before(() => {
 
 after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
 
-function run(script: string, command: string, generation?: string): any {
+function run(script: string, command: string, generation?: string, extra: string[] = []): any {
 	const args = [script, command, "--memory-root", memoryRoot];
 	if (generation) args.push("--generation", generation);
+	args.push(...extra);
 	return JSON.parse(execFileSync(process.execPath, args, { cwd: tempRoot, encoding: "utf8" }));
 }
 
@@ -48,7 +50,37 @@ describe("offline embedding compaction runner", () => {
 		const switchedCompact = run(compactRunner, "switch", "gen_compact_a");
 		assert.equal(switchedCompact.pointer.active_generation_id, "gen_compact_a");
 		assert.ok(switchedCompact.archived_delta_path);
-		assert.ok(fs.existsSync(path.join(memoryRoot, "embedding_delta", "manifest.json")));
+		const receipt = JSON.parse(fs.readFileSync(path.join(switchedCompact.archived_delta_path, "merge_receipt.json"), "utf8"));
+		assert.equal(receipt.receipt_schema_version, 2);
+		assert.ok(fs.existsSync(path.join(switchedCompact.archived_delta_path, "merge_contract.json")));
+		const archivedManifest = JSON.parse(fs.readFileSync(path.join(switchedCompact.archived_delta_path, "manifest.json"), "utf8"));
+		const freshManifest = JSON.parse(fs.readFileSync(path.join(memoryRoot, "embedding_delta", "manifest.json"), "utf8"));
+		assert.notEqual(freshManifest.delta_id, archivedManifest.delta_id);
+		assert.match(freshManifest.delta_id, /^delta_\d{8}_002$/);
+		assert.equal(freshManifest.state, "active");
+		assert.equal(freshManifest.base_generation_id, "gen_compact_a");
 		assert.equal(fs.existsSync(path.join(memoryRoot, ".embedding-compaction.lock")), false);
+	});
+
+	test("propagates an exact validated policy through multiview compaction", async () => {
+		const artifactPath = path.join(tempRoot, "validated-evidence-policy.json");
+		await writeValidatedEvidenceArtifact(artifactPath, 0.1);
+		const base = run(migrateRunner, "build", "gen_mv_compact_base", ["--representation", "multiview", "--evidence-policy", artifactPath]);
+		assert.equal(base.state, "ready");
+		assert.equal(run(migrateRunner, "switch", "gen_mv_compact_base").pointer.active_generation_id, "gen_mv_compact_base");
+		// Migration intentionally never rewrites a pre-switch delta; model the explicit fresh-delta reset in this isolated fixture.
+		fs.rmSync(path.join(memoryRoot, "embedding_delta"), { recursive: true, force: true });
+		const preflight = run(compactRunner, "preflight");
+		assert.equal(preflight.active_generation_id, "gen_mv_compact_base");
+		const compactBuilt = run(compactRunner, "build", "gen_mv_compact_target", ["--evidence-policy", artifactPath]);
+		assert.equal(compactBuilt.state, "ready");
+		const activeManifest = JSON.parse(fs.readFileSync(path.join(memoryRoot, "embedding_generations", "gen_mv_compact_base", "manifest.json"), "utf8"));
+		const targetManifest = JSON.parse(fs.readFileSync(path.join(memoryRoot, "embedding_generations", "gen_mv_compact_target", "manifest.json"), "utf8"));
+		assert.deepEqual(targetManifest.evidence_policy, activeManifest.evidence_policy);
+		assert.equal(run(compactRunner, "validate", "gen_mv_compact_target").valid, true);
+		const switched = run(compactRunner, "switch", "gen_mv_compact_target");
+		assert.equal(switched.pointer.active_generation_id, "gen_mv_compact_target");
+		const freshDelta = JSON.parse(fs.readFileSync(path.join(memoryRoot, "embedding_delta", "manifest.json"), "utf8"));
+		assert.deepEqual(freshDelta.evidence_policy, targetManifest.evidence_policy);
 	});
 });

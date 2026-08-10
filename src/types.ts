@@ -63,11 +63,71 @@ export interface FragmentWeightMeta {
 // ============================================================
 
 export type EmbeddingGenerationState = "building" | "ready" | "active" | "failed";
+export type EmbeddingRepresentationKind = "single" | "multiview";
+export type EmbeddingViewKind = "summary" | "evidence";
+
+export interface EmbeddingSourceSpan {
+	source_field: string;
+	start_char: number;
+	end_char: number;
+	start_token: number;
+	end_token: number;
+}
+
+export interface EmbeddingViewDisclosure {
+	disclosure_level: "T1" | "T2";
+	snippet: string;
+	snippet_token_count: number;
+	snippet_anchor: "view_fallback";
+}
+
+/** Retrieval presentation metadata is additive: it never changes fragment identity or ranking. */
+export type RawSimilarityMode =
+	| "fragment-single-vector-v1"
+	| "fragment-max-view-v1"
+	| "fragment-summary-only-shadow-v1"
+	| "fragment-fallback-jaccard-v1";
+
+export type SearchSnippetAnchor = "lexical_overlap" | "view_fallback" | null;
+
+/** Immutable evidence-gate decision copied into every production multiview identity. */
+export interface EvidenceGatePolicySnapshot {
+	policy_schema_version: 1;
+	policy_id: string;
+	status: "validated";
+	calibration_scope_hash: string;
+	calibration_artifact_hash: string;
+	evidence_threshold: number;
+	/** 渐进式披露（方案 B）：披露门下限；缺省时用自适应式 max(0.5, 0.8×summary)。不进 scope hash（只改呈现不改表示）。 */
+	disclosure_threshold?: number;
+	raw_similarity_mode: "fragment-max-view-v1";
+	development_dataset_hash: string;
+	holdout_dataset_hash: string;
+}
+
+export interface EmbeddingMaterializedView {
+	view_id: string;
+	kind: EmbeddingViewKind;
+	input_hash: string;
+	vector_hash: string;
+	vector_dimension: number;
+	tokens: unknown;
+	source_spans: EmbeddingSourceSpan[];
+	disclosure: EmbeddingViewDisclosure;
+}
 
 export interface EmbeddingGenerationManifest {
 	manifest_schema_version: number;
 	generation_id: string;
 	state: EmbeddingGenerationState;
+	representation_kind?: EmbeddingRepresentationKind;
+	document_policy_version?: number | null;
+	multiview_policy?: { evidence_window_tokens: number; evidence_overlap_tokens: number; disclosure_snippet_tokens: number } | null;
+	view_schema_version?: number | null;
+	aggregation_mode?: string;
+	evidence_policy_id?: string | null;
+	evidence_policy?: EvidenceGatePolicySnapshot | null;
+	retrieval_epoch?: string;
 	document_recipe_id: string;
 	document_recipe_version: number;
 	query_recipe_id: string;
@@ -103,6 +163,12 @@ export interface ActiveEmbeddingPointer {
 export interface EmbeddingGenerationRecord {
 	fragment_id: string;
 	generation_id: string;
+	view_id?: string;
+	view_kind?: EmbeddingViewKind;
+	source_spans?: EmbeddingSourceSpan[];
+	disclosure?: EmbeddingViewDisclosure;
+	views?: EmbeddingMaterializedView[];
+	view_set_hash?: string;
 	source_content_hash: string;
 	input_hash: string;
 	vector_hash: string;
@@ -128,6 +194,14 @@ export interface EmbeddingDeltaManifest {
 	delta_schema_version: number;
 	delta_id: string;
 	state: EmbeddingDeltaState;
+	representation_kind?: EmbeddingRepresentationKind;
+	document_policy_version?: number | null;
+	multiview_policy?: { evidence_window_tokens: number; evidence_overlap_tokens: number; disclosure_snippet_tokens: number } | null;
+	view_schema_version?: number | null;
+	aggregation_mode?: string;
+	evidence_policy_id?: string | null;
+	evidence_policy?: EvidenceGatePolicySnapshot | null;
+	retrieval_epoch?: string;
 	base_generation_id: string;
 	base_manifest_hash: string;
 	representation_identity_hash: string;
@@ -148,6 +222,12 @@ export interface EmbeddingDeltaRecord {
 	record_schema_version: number;
 	delta_id: string;
 	fragment_id: string;
+	view_id?: string;
+	view_kind?: EmbeddingViewKind;
+	source_spans?: EmbeddingSourceSpan[];
+	disclosure?: EmbeddingViewDisclosure;
+	views?: EmbeddingMaterializedView[];
+	view_set_hash?: string;
 	state: EmbeddingDeltaRecordState;
 	operation: "create" | "update" | "delete" | "reconcile";
 	source_content_hash: string | null;
@@ -231,6 +311,17 @@ export interface SearchResultItem {
 	embedding_layer?: EmbeddingLayer;
 	base_generation_id?: string | null;
 	delta_id?: string | null;
+	matched_view: string | null;
+	matched_source_range: EmbeddingSourceSpan | null;
+	matched_snippet: string | null;
+	snippet_anchor: SearchSnippetAnchor;
+	/** 渐进式披露（方案 B）：未过竞争门但过披露门的证据存在性提示；仅进入结果的片段携带，每查询上限见配置。 */
+	evidence_hint?: EvidenceHint;
+	generation_id: string | null;
+	representation_identity_hash: string | null;
+	retrieval_epoch: string | null;
+	raw_similarity_mode: RawSimilarityMode;
+	evidence_policy_id: string | null;
 	hierarchy: {
 		daily_summary: string | null;
 		topic_name: string;
@@ -242,6 +333,18 @@ export interface SearchResults {
 	query: string;
 	results: SearchResultItem[];
 	health?: EmbeddingHealthSnapshot;
+}
+
+/** 渐进式披露（方案 B）的低置信证据提示：告知 LLM 片段中段可能存在与查询相关的内容。 */
+export interface EvidenceHint {
+	/** 该片段最佳 evidence 视图与 query 的 cosine 分数（未过竞争门但过披露门）。 */
+	score: number;
+	/** 证据视图覆盖的原文范围（turns 或字符 span 的人类可读表示）。 */
+	source_range: string;
+	/** 证据中段预览（复用视图自带 disclosure snippet，无新增 I/O）。 */
+	snippet: string;
+	/** 命中的 evidence 视图 ID（便于调试与未来 view 级联想）。 */
+	view_id: string;
 }
 
 // ============================================================

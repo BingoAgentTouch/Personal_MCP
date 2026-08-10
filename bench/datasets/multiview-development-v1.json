@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "dataset_id": "multiview-development-v1",
+  "content_hash": "sha256:5b3141e821b802174e7350806e7f38c16d3ce05d5e85b0e0fd63003d0c21c6e4",
+  "cases": [
+    {
+      "case_id": "dev-middle-chinese",
+      "query": "电梯交互状态机报错",
+      "expected_fragment_id": "fixture/dev_001",
+      "evidence_expected": true,
+      "placement": "middle",
+      "candidates": [
+        {
+          "fragment_id": "fixture/dev_001",
+          "single_score": 0.33,
+          "summary_score": 0.41,
+          "evidence_score": 0.93
+        },
+        {
+          "fragment_id": "fixture/dev_noise",
+          "single_score": 0.45,
+          "summary_score": 0.48,
+          "evidence_score": 0.34
+        }
+      ]
+    },
+    {
+      "case_id": "dev-boundary-identifier",
+      "query": "NodePath ElevatorPanel",
+      "expected_fragment_id": "fixture/dev_002",
+      "evidence_expected": true,
+      "placement": "near_boundary",
+      "candidates": [
+        {
+          "fragment_id": "fixture/dev_002",
+          "single_score": 0.39,
+          "summary_score": 0.44,
+          "evidence_score": 0.87
+        },
+        {
+          "fragment_id": "fixture/dev_noise",
+          "single_score": 0.43,
+          "summary_score": 0.47,
+          "evidence_score": 0.41
+        }
+      ]
+    },
+    {
+      "case_id": "dev-tail-number",
+      "query": "第 512 帧速度 3.5",
+      "expected_fragment_id": "fixture/dev_003",
+      "evidence_expected": true,
+      "placement": "tail",
+      "candidates": [
+        {
+          "fragment_id": "fixture/dev_003",
+          "single_score": 0.31,
+          "summary_score": 0.42,
+          "evidence_score": 0.81
+        },
+        {
+          "fragment_id": "fixture/dev_noise",
+          "single_score": 0.44,
+          "summary_score": 0.46,
+          "evidence_score": 0.36
+        }
+      ]
+    },
+    {
+      "case_id": "dev-summary-only",
+      "query": "整体方案结论",
+      "expected_fragment_id": "fixture/dev_004",
+      "evidence_expected": false,
+      "placement": "absent",
+      "candidates": [
+        {
+          "fragment_id": "fixture/dev_004",
+          "single_score": 0.67,
+          "summary_score": 0.82,
+          "evidence_score": 0.55
+        },
+        {
+          "fragment_id": "fixture/dev_noise",
+          "single_score": 0.42,
+          "summary_score": 0.4,
+          "evidence_score": 0.43
+        }
+      ]
+    },
+    {
+      "case_id": "dev-adversarial-path",
+      "query": "res://ui/HUD.tscn",
+      "expected_fragment_id": "fixture/dev_005",
+      "evidence_expected": false,
+      "placement": "absent",
+      "candidates": [
+        {
+          "fragment_id": "fixture/dev_005",
+          "single_score": 0.64,
+          "summary_score": 0.79,
+          "evidence_score": 0.58
+        },
+        {
+          "fragment_id": "fixture/dev_noise",
+          "single_score": 0.41,
+          "summary_score": 0.38,
+          "evidence_score": 0.47
+        }
+      ]
+    }
+  ]
+}

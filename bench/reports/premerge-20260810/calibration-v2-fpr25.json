@@ -1,0 +1,32 @@
+{
+  "report_schema_version": 1,
+  "report_type": "multiview-development-calibration",
+  "development": {
+    "dataset_id": "multiview-development-v2",
+    "dataset_hash": "sha256:9b227b010bfab944790e7d23957b7fc9e01ab20a4095b3a9d30300997244923a"
+  },
+  "dataset_id": "multiview-development-v2",
+  "dataset_hash": "sha256:9b227b010bfab944790e7d23957b7fc9e01ab20a4095b3a9d30300997244923a",
+  "scope": {
+    "model_id": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+    "tokenizer_id": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+    "document_recipe_id": "fragment-multiview-budgeted",
+    "document_recipe_version": 1,
+    "multiview_policy": {
+      "evidence_window_tokens": 288,
+      "evidence_overlap_tokens": 48,
+      "disclosure_snippet_tokens": 80
+    },
+    "aggregation_mode": "fragment-max-view-v1",
+    "raw_similarity_mode": "fragment-max-view-v1"
+  },
+  "scope_hash": "sha256:75668c43d0863fd64b3c608b576b026e9e1fdbc2c07aecad7cb06fd312ceab25",
+  "objectives": {
+    "max_fpr": 0.25,
+    "min_evidence_recall": 1
+  },
+  "candidate_count": 20,
+  "selected": null,
+  "candidate_artifact": null,
+  "decision": "no_go"
+}

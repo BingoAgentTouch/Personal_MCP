@@ -45,7 +45,7 @@ import {
 } from "../storage/topics.js";
 import { search } from "../search/retriever.js";
 import { logSearch, logGetFragment } from "../storage/signals.js";
-import { buildDocumentInput, sourceContentHash } from "../embedding/builder.js";
+import { buildDocumentInput, buildDocumentViews, sourceContentHash } from "../embedding/builder.js";
 import { encodeStrict, isFallbackMode } from "../embedding/provider.js";
 import { getActiveGeneration } from "../embedding/generation.js";
 import {
@@ -54,6 +54,7 @@ import {
 	createPendingDeltaRecord,
 	ensureActiveDelta,
 	upsertDeltaRecord,
+	upsertDeltaViews,
 } from "../embedding/delta.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -92,24 +93,35 @@ export async function handleCreateFragment(input: CreateFragmentInput) {
 		const delta = assertDeltaWritable();
 		const importance = input.importance ?? DEFAULT_META.importance;
 		const prepared = prepareFragment({ ...input, agent_id: input.agent_id, importance });
-		const built = await buildDocumentInput({
+		const documentInput = {
 			task_desc: prepared.meta.task_desc,
 			result_desc: prepared.meta.result_desc,
 			tags: prepared.meta.tags,
 			topic_name: prepared.meta.topic_name,
 			turns_text: prepared.meta.turns_text,
-		}, active);
-		const embedding = await encodeStrict(built.text);
-		const sourceHash = sourceContentHash({
-			task_desc: prepared.meta.task_desc,
-			result_desc: prepared.meta.result_desc,
-			tags: prepared.meta.tags,
-			topic_name: prepared.meta.topic_name,
-			turns_text: prepared.meta.turns_text,
-		});
+		};
+		let embeddingDim = 0;
+		let singleEmbedding: { vector: number[]; inputHash: string; tokens: unknown } | null = null;
+		let multiviewPayload: Array<import("../embedding/delta.js").MaterializedDeltaView> | null = null;
+		if (active.representation_kind === "multiview") {
+			const builtViews = await buildDocumentViews(documentInput, active);
+			const encoded = await Promise.all(builtViews.views.map(async (view) => ({ view, vector: await encodeStrict(view.text) })));
+			embeddingDim = encoded[0]?.vector.length ?? 0;
+			multiviewPayload = encoded.map(({ view, vector }) => ({ view_id: view.view_id, kind: view.kind, vector, input_hash: view.input_hash, tokens: view.tokens, source_spans: view.source_spans, disclosure: view.disclosure }));
+		} else {
+			const built = await buildDocumentInput(documentInput, active);
+			const vector = await encodeStrict(built.text);
+			embeddingDim = vector.length;
+			singleEmbedding = { vector, inputHash: built.input_hash, tokens: built.tokens };
+		}
+		const sourceHash = sourceContentHash(documentInput);
 		const { fragment_id, meta } = commitPreparedFragment(prepared);
 		try {
-			upsertDeltaRecord(delta, fragment_id, embedding, built.input_hash, sourceHash, built.tokens, "create");
+			if (active.representation_kind === "multiview") {
+				upsertDeltaViews(delta, fragment_id, sourceHash, multiviewPayload!, "create");
+			} else {
+				upsertDeltaRecord(delta, fragment_id, singleEmbedding!.vector, singleEmbedding!.inputHash, sourceHash, singleEmbedding!.tokens, "create");
+			}
 		} catch (error) {
 			rollbackPreparedFragment(prepared);
 			createPendingDeltaRecord(delta, fragment_id, error instanceof Error ? error.message : String(error));
@@ -125,7 +137,7 @@ export async function handleCreateFragment(input: CreateFragmentInput) {
 							task_desc: meta.task_desc,
 							result_desc: meta.result_desc,
 							turns_length: meta.turns_text.length,
-							embedding_dim: embedding.length,
+							embedding_dim: embeddingDim,
 							embedding_mode: isFallbackMode() ? "fallback" : "transformers",
 							embedding_status: "ready",
 							embedding_layer: "delta",
@@ -159,22 +171,23 @@ async function syncFragmentToDelta(fragmentId: string, operation: "create" | "up
 		createPendingDeltaRecord(delta, fragmentId, "fragment_missing_after_update");
 		return;
 	}
-	const built = await buildDocumentInput({
+	const documentInput = {
 		task_desc: fragment.task_desc,
 		result_desc: fragment.result_desc,
 		tags: fragment.tags,
 		topic_name: fragment.topic_name,
 		turns_text: fragment.turns_text,
-	}, active);
-	const embedding = await encodeStrict(built.text);
-	const sourceHash = sourceContentHash({
-		task_desc: fragment.task_desc,
-		result_desc: fragment.result_desc,
-		tags: fragment.tags,
-		topic_name: fragment.topic_name,
-		turns_text: fragment.turns_text,
-	});
-	upsertDeltaRecord(delta, fragmentId, embedding, built.input_hash, sourceHash, built.tokens, operation);
+	};
+	const sourceHash = sourceContentHash(documentInput);
+	if (active.representation_kind === "multiview") {
+		const builtViews = await buildDocumentViews(documentInput, active);
+		const encodedViews = await Promise.all(builtViews.views.map(async (view) => ({ view, vector: await encodeStrict(view.text) })));
+		upsertDeltaViews(delta, fragmentId, sourceHash, encodedViews.map(({ view, vector }) => ({ view_id: view.view_id, kind: view.kind, vector, input_hash: view.input_hash, tokens: view.tokens, source_spans: view.source_spans, disclosure: view.disclosure })), operation);
+	} else {
+		const built = await buildDocumentInput(documentInput, active);
+		const vector = await encodeStrict(built.text);
+		upsertDeltaRecord(delta, fragmentId, vector, built.input_hash, sourceHash, built.tokens, operation);
+	}
 }
 
 export async function handleCreateDailySummary(input: CreateDailySummaryInput) {
@@ -204,7 +217,7 @@ export async function handleUpsertTopic(input: UpsertTopicInput) {
 export async function handleSearch(input: SearchInput) {
 	const results = await search(input.query, input.top_k ?? 10, input.agent_id);
 	// P3 埋点：纯观察，记录本次检索 surface 出的片段名次/相似度/权重，不影响排名
-	logSearch(results.query, results.results, input.agent_id);
+	logSearch(results, input.agent_id);
 	return {
 		content: [
 			{

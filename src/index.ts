@@ -30,6 +30,7 @@ import { listDates as listDailyDates, getDailySummary } from "./storage/daily.js
 import { listTopics, getTopicRaw } from "./storage/topics.js";
 import { readTurns, getTurnRangeText } from "./storage/raw.js";
 import { listDates as listRawDates } from "./storage/raw.js";
+import { startWatcher, observe as watcherObserve } from "./watcher/index.js";
 
 const server = new Server(
 	{
@@ -60,6 +61,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 			content: [{ type: "text", text: `未知工具：${name}` }],
 			isError: true,
 		};
+	}
+	// watcher 观测层：只读旁观，独立 try-catch（try 块外），不污染工具响应
+	try {
+		watcherObserve(name, args ?? {});
+	} catch {
+		// best-effort：观测异常绝不影响工具调用
 	}
 	try {
 		return await handler(args ?? {});
@@ -205,6 +212,8 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 // ============================================================
 
 async function main() {
+	// 启动 watcher 观测层（随进程初始化，进程退出即结束）
+	startWatcher();
 	const transport = new StdioServerTransport();
 	await server.connect(transport);
 	console.error("[memory-mcp-server] 已启动，等待客户端连接...");

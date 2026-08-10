@@ -122,6 +122,79 @@ node <绝对路径>/migrate_embeddings.mjs switch --generation gen_YYYYMMDD_xxx
 
 当前简化模型下，服务器启动不会自动做 orphan reconcile 或后台修复；如果你怀疑 delta/base 状态不一致，直接走手动 rebuild + switch。
 
+## Multiview evidence calibration（离线维护者流程）
+
+多窗口 evidence gate 只允许使用通过 development 与 hold-out 验证的、版本化 fixture calibration artifact；不能把 `src/search/retriever.ts` 中的旧候选阈值当作 production policy。评测工具只读取 `bench/datasets/`，不会读取或修改任何 `memory/` root；它不切 active pointer，也不生成真实 generation。
+
+```bash
+node bench/run-multiview-eval.mjs calibrate \
+  --max-fpr 0 \
+  --min-evidence-recall 1 \
+  --output <candidate-report.json>
+
+# 从 candidate-report.json 提取 candidate_artifact 后，使用 untouched hold-out：
+node bench/run-multiview-eval.mjs validate \
+  --artifact <candidate-artifact.json> \
+  --output <holdout-report.json>
+
+node bench/run-multiview-eval.mjs evaluate \
+  --threshold <validated-threshold> \
+  --output <shadow-report.json>
+```
+
+`validate` 只有在 hold-out 满足冻结目标时才会输出 `validated` artifact；失败时报告 `no_go`，不得手动把 candidate 标为 validated。artifact 绑定 model/tokenizer、recipe、窗口策略、aggregation/raw-similarity mode、development/hold-out dataset hash 和 canonical artifact hash。
+
+新的 multiview generation、activation、delta 写入与 compaction 都必须携带并校验该 immutable validated snapshot；compaction 的 artifact 还必须与 active generation 的 snapshot 完全一致。历史 policy-less multiview generation 仍可读取，并在 search 中保持 summary-only shadow；它们不能重新激活或创建/重置/写入 delta。
+
+本项目采用简单、手动维护优先的落地策略，不把大规模生产级 calibration、长时间 shadow observation 或复杂自动运维作为首次启用的前置条件。真实库首次启用时只需在维护窗口完成 multiview build → validate → switch，保留旧 generation，并用少量真实查询做 sanity check；必要时手动回切旧 generation。fixture artifact 不能冒充真实生产阈值，但不再阻塞首次使用。
+
+## Compaction 日常维护流程（手动维护）
+
+日常写入走 **delta 增量层**（generation 是不可变快照，写入只更新 `memory/embedding_delta/`）。delta 条目数 D 增长后：① 每次 `create_fragment` 重写 `delta_index.json` 的写放大 ≈ O(D²)；② 检索多一层校验。**compaction** 把 base + delta 合并进一个全新 generation 并清空 delta（两层变一层）。
+
+**什么时候做**：delta 条目数（`memory/embedding_delta/delta_index.json` 的键数）≥ 100~300、`create_fragment`/`memory_search` 明显变慢、或按使用强度定期（如每月/每 200 片段）。**全程在维护窗口执行，先备份 memory 根**。
+
+```bash
+cd <记忆库所在的项目根>          # 存储根相对 CWD，必须
+node <绝对路径>/compact_embeddings.mjs preflight --generation gen_YYYYMMDD_compaction --representation multiview --evidence-policy <validated-artifact.json>
+node <绝对路径>/compact_embeddings.mjs build --generation gen_YYYYMMDD_compaction
+node <绝对路径>/compact_embeddings.mjs validate --generation gen_YYYYMMDD_compaction
+node <绝对路径>/compact_embeddings.mjs switch --generation gen_YYYYMMDD_compaction
+```
+
+- `--representation` 必须与当前 active generation 一致；multiview 时必须携带 **validated** evidence policy（`run-multiview-eval.mjs validate` 产出，candidate 不可用）。
+- preflight 会**上 compaction 锁 + 封存 delta + 写 merge contract**；validate 不通过**不得 switch**；异常中断先用 `compact_embeddings.mjs unlock` 确认解锁，不要把 unlock 当通用恢复手段。
+- switch 后旧 generation 保留在 `previous_generation_id`，可手动回切。
+- 换模型/换表示请用 `migrate_embeddings.mjs`，不要用 compaction 顶替。
+- 详细判定信号、故障处理与操作前检查清单见《项目维护/memory-mcp-server_compaction维护手册_20260809.md》；archive 恢复场景见下一节。
+
+## Compaction archive recovery（维护者手动流程）
+
+此流程只用于恢复一个 **C3-3B v2 compaction archive**：把 archive 中的 sealed delta 和记录的 base active pointer 原样恢复。它不是通用 JSON 修复、`migrate_embeddings.mjs` 的 rollback、orphan reconcile，也不是面向日常用户的操作。
+
+当前没有公开的 restore CLI 或 MCP tool；仅维护者可在受控环境中调用内部 API：`verifyArchivedDelta(archivePath)`、`restoreArchivedDelta(archivePath)`、`recoverDeltaRestoreTransaction()`。**不要**手动复制 archive 文件、改写 `embedding_active.json`、删除 transaction，或把 `compact_embeddings.mjs unlock` 当作通用恢复手段。
+
+恢复前按顺序完成：
+
+1. 停止 MCP server 和全部写入方，记录绝对 memory root、候选 archive 路径、当前 active pointer、delta manifest/index 摘要、compaction lock，以及 `memory/embedding_delta/transactions/restore-*` 目录。
+2. 对整个 memory root 做独立的字节级备份；恢复流程不会替代这一份操作前备份。
+3. 只选择 `memory/embedding_delta/archive/<delta-id>-into-<target-generation-id>/` 下的 archive。它必须包含 `merge_receipt.json`、`merge_contract.json`、`manifest.json`、`delta_index.json`；有 materialized record 时还必须有对应 `vectors/` payload。
+4. 先执行 `verifyArchivedDelta(archivePath)`，只有返回 `valid: true` 才能继续。v1 receipt、任意 payload/receipt/contract/pointer 校验失败都必须停止，不能尝试“修好” archive 后继续。
+5. `restoreArchivedDelta(archivePath)` 会再次拒绝 source inventory 漂移、active pointer 不等于 receipt target pointer、非空的 post-compaction target delta、或已有未完成 restore transaction。满足条件后它才会恢复 archive 的 sealed delta，并最后写入 receipt base pointer。
+6. 成功后确认：active pointer 等于 `receipt.pointer_snapshots.base`；live delta 的 ID/payload 等于 archive、状态为 `sealed`、兼容性正常；target generation 与 archive 均仍存在；没有遗留 `restore-*` transaction。
+
+正常调用返回 `{ restored: true, idempotent: false }`；若已经完全处于 archive 记录的 base+sealed-delta 状态，会返回 `{ restored: false, idempotent: true }`。若出现 `recovery_failed: true`，保留其 `transaction_path`、archive、pointer/manifest 快照和错误输出，**不要重跑 restore 或手动清理**；由维护者先调用一次 `recoverDeltaRestoreTransaction()`。多个 restore transaction、未知 transaction schema、archive 验证失败或 recovery 再次失败都属于停止并人工检查的条件，不能 force-unlock。
+
+当没有有效 archive、source 已变化或 pointer 状态不满足恢复前提时，走受控 rebuild：
+
+```bash
+node <绝对路径>/migrate_embeddings.mjs build --generation gen_YYYYMMDD_xxx
+node <绝对路径>/migrate_embeddings.mjs validate --generation gen_YYYYMMDD_xxx
+node <绝对路径>/migrate_embeddings.mjs switch --generation gen_YYYYMMDD_xxx
+```
+
+对真实 memory root 的复制副本演练、自动启动恢复、公开 restore CLI 和 MCP restore tool 都是后续独立授权事项；本文档不启用它们。
+
 ---
 
 ## MCP 工具一览

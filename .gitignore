@@ -15,6 +15,7 @@ tsc_err.txt
 db_schema.txt
 test_output.txt
 *.log
+logs/
 
 # ── 环境与密钥 ────────────────────────────────────────
 .env
