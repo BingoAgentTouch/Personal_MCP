@@ -3,6 +3,13 @@
 本项目配置了 memory-mcp-server 提供长期记忆能力。
 MCP 工具名称为 `memory-*`，已在 `{{settings_path}}` 中注册。
 
+## 热工作记忆（Hot Working Memory）
+
+调用 `memory_search` 检索记忆后，**主动 Read `memory/work_memory.md`**：
+- 该文件由 memory-mcp 后台持续维护：search 触发主体条目替换，后台定时轮询追加相关记忆
+- 内容为「相关记忆的摘要 + 路径」，可直接消费摘要，深挖用 `memory_get_fragment(<fragment_id>)`
+- 文件限大小（预算内），注满即停；新一轮 search 会替换主体条目
+
 ## 回答前 → 查记忆
 
 每次开始回答用户之前，先调用 `memory_search` 查询当前话题的相关记忆。

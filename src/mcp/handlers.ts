@@ -45,6 +45,7 @@ import {
 } from "../storage/topics.js";
 import { search } from "../search/retriever.js";
 import { logSearch, logGetFragment } from "../storage/signals.js";
+import { workMemory } from "../work_memory.js";
 import { buildDocumentInput, buildDocumentViews, sourceContentHash } from "../embedding/builder.js";
 import { encodeStrict, isFallbackMode } from "../embedding/provider.js";
 import { getActiveGeneration } from "../embedding/generation.js";
@@ -218,6 +219,8 @@ export async function handleSearch(input: SearchInput) {
 	const results = await search(input.query, input.top_k ?? 10, input.agent_id);
 	// P3 埋点：纯观察，记录本次检索 surface 出的片段名次/相似度/权重，不影响排名
 	logSearch(results, input.agent_id);
+	// 热工作记忆：search 触发主体条目替换（best-effort，不阻断检索）
+	workMemory.refresh(input.query, results);
 	return {
 		content: [
 			{

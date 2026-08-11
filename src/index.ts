@@ -31,6 +31,7 @@ import { listTopics, getTopicRaw } from "./storage/topics.js";
 import { readTurns, getTurnRangeText } from "./storage/raw.js";
 import { listDates as listRawDates } from "./storage/raw.js";
 import { startWatcher, observe as watcherObserve } from "./watcher/index.js";
+import { workMemory } from "./work_memory.js";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -225,7 +226,7 @@ function injectHarnessUsage() {
 	try {
 		const scriptPath = join(dirname(fileURLToPath(import.meta.url)), "../scripts/inject_memory_usage.mjs");
 		const result = spawnSync(process.execPath, [scriptPath, process.cwd()], {
-			timeout: 15000,
+			timeout: 2000,
 			stdio: ["ignore", "ignore", "pipe"],
 		});
 		if (result.status !== 0) {
@@ -240,6 +241,8 @@ function injectHarnessUsage() {
 async function main() {
 	// 向 harness 规则文件注入使用声明（幂等，不阻断启动）
 	injectHarnessUsage();
+	// 热工作记忆：清空上一会话残留（best-effort）
+	workMemory.init();
 	// 启动 watcher 观测层（随进程初始化，进程退出即结束）
 	startWatcher();
 	const transport = new StdioServerTransport();
