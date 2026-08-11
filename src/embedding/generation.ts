@@ -103,6 +103,12 @@ export function generationMultiviewSidecarPath(generationId: string, fragmentId:
 	return path.join(generationDir(generationId), "vectors", date, id, "views.json");
 }
 
+/** O3：multiview 视图向量二进制文件（view_schema_version=2 的 sidecar 配套，Float32Array 按 view_id 排序拼接）。 */
+export function generationMultiviewVectorsBinPath(generationId: string, fragmentId: string): string {
+	const [date, id] = parseFragmentId(fragmentId);
+	return path.join(generationDir(generationId), "vectors", date, id, "vectors.bin");
+}
+
 function atomicWrite(filePath: string, content: string): void {
 	ensureDir(path.dirname(filePath));
 	const tempPath = `${filePath}.tmp`;
@@ -128,7 +134,7 @@ function removeIfExists(filePath: string): void {
 interface GenerationTransactionTarget {
 	livePath: string;
 	stagedPath: string;
-	originalContent: string | null;
+	originalContent: string | Buffer | null;
 }
 
 function writeGenerationTransactionState(
@@ -149,7 +155,8 @@ function rollbackGenerationTransaction(targets: GenerationTransactionTarget[]): 
 		removeIfExists(target.livePath);
 		if (target.originalContent !== null) {
 			ensureDir(path.dirname(target.livePath));
-			fs.writeFileSync(target.livePath, target.originalContent, "utf8");
+			// O3：Buffer（向量二进制）不带 utf8 编码写回，避免破坏二进制内容
+			fs.writeFileSync(target.livePath, target.originalContent, Buffer.isBuffer(target.originalContent) ? undefined : "utf8");
 		}
 	}
 }
@@ -157,13 +164,14 @@ function rollbackGenerationTransaction(targets: GenerationTransactionTarget[]): 
 function commitGenerationFragmentFiles(
 	generationId: string,
 	fragmentId: string,
-	contents: Array<{ livePath: string; content: string }>,
+	contents: Array<{ livePath: string; content: string | Buffer }>,
 ): void {
 	const transactionRoot = generationTransactionRoot(generationId, nextGenerationTransactionId());
 	const targets: GenerationTransactionTarget[] = contents.map(({ livePath }, index) => ({
 		livePath,
 		stagedPath: path.join(transactionRoot, "staged", `${index}.tmp`),
-		originalContent: fs.existsSync(livePath) ? fs.readFileSync(livePath, "utf8") : null,
+		// O3：向量二进制文件（Buffer）原样保留；文本文件 utf8 读（兼容 string）
+		originalContent: fs.existsSync(livePath) ? fs.readFileSync(livePath) : null,
 	}));
 	try {
 		ensureDir(path.join(transactionRoot, "staged"));
@@ -217,7 +225,7 @@ function coverageEquals(left: number, right: number): boolean {
 
 export function assertMultiviewGenerationPolicy(manifest: EmbeddingGenerationManifest): void {
 	if (!isMultiviewGeneration(manifest)) return;
-	if (manifest.view_schema_version !== 1) throw new Error(`multiview view schema mismatch: ${manifest.generation_id}`);
+	if (manifest.view_schema_version !== 1 && manifest.view_schema_version !== 2) throw new Error(`multiview view schema mismatch: ${manifest.generation_id}`); // O3：冻结 v2，兼容 v1 旧库
 	if (manifest.document_policy_version !== MULTIVIEW_POLICY_VERSION) throw new Error(`multiview document policy mismatch: ${manifest.generation_id}`);
 	if (!manifest.multiview_policy) throw new Error(`multiview policy missing: ${manifest.generation_id}`);
 	if (manifest.aggregation_mode !== MULTIVIEW_AGGREGATION_MODE) throw new Error(`multiview aggregation mismatch: ${manifest.generation_id}`);
@@ -358,7 +366,7 @@ export async function createGeneration(
 		representation_kind: representationKind,
 		document_policy_version: isMultiview ? MULTIVIEW_POLICY_VERSION : null,
 		multiview_policy: isMultiview ? DEFAULT_MULTIVIEW_POLICY : null,
-		view_schema_version: isMultiview ? 1 : null,
+		view_schema_version: isMultiview ? 2 : null,  // O3：冻结 v2（sidecar 双格式兼容已就绪，读兼容 v1/v2）
 		aggregation_mode: isMultiview ? MULTIVIEW_AGGREGATION_MODE : "fragment-single-vector-v1",
 		evidence_policy_id: isMultiview ? evidencePolicy!.policy_id : null,
 		evidence_policy: isMultiview ? evidencePolicy! : null,
@@ -462,7 +470,9 @@ export function writeGenerationViews(
 	if (summaryViews.length !== 1) throw new Error(`multiview materialization requires exactly one summary view for ${fragmentId}`);
 	const ids = new Set<string>();
 	const materialized: EmbeddingMaterializedView[] = [];
-	for (const view of views) {
+	// O3：向量写入前 float32 round-trip（vectors.bin 按 Float32 存储，round-trip 保证读回值与写时一致，full 校验 hash 匹配）
+	const normalizedViews = views.map((view) => ({ ...view, vector: Array.from(new Float32Array(view.vector)) }));
+	for (const view of normalizedViews) {
 		if (!view.view_id || !/^[A-Za-z0-9._-]+$/.test(view.view_id)) throw new Error(`invalid multiview id: ${fragmentId}/${view.view_id}`);
 		if (ids.has(view.view_id)) throw new Error(`duplicate multiview id: ${fragmentId}/${view.view_id}`);
 		ids.add(view.view_id);
@@ -482,13 +492,27 @@ export function writeGenerationViews(
 		});
 	}
 	const summary = summaryViews[0];
-	const summaryBytes = JSON.stringify(summary.vector);
+	const normalizedSummary = normalizedViews.find((view) => view.view_id === summary.view_id)!;
+	const summaryBytes = JSON.stringify(normalizedSummary.vector);
+	// O3 v2 sidecar：views 值存元数据（JSON），向量移入 vectors.bin（Float32Array 按 view_id 排序拼接）
 	const sidecar = {
-		view_schema_version: 1,
+		view_schema_version: 2,
 		fragment_id: fragmentId,
 		source_content_hash: sourceHash,
-		views: Object.fromEntries(views.map((view) => [view.view_id, view.vector])),
+		views: Object.fromEntries(materialized.map((view) => [view.view_id, {
+			kind: view.kind,
+			input_hash: view.input_hash,
+			vector_hash: view.vector_hash,
+			vector_dimension: view.vector_dimension,
+			tokens: view.tokens,
+			source_spans: view.source_spans,
+			disclosure: view.disclosure,
+		}])),
 	};
+	const orderedViews = [...normalizedViews].sort((left, right) => left.view_id.localeCompare(right.view_id));
+	const bin = new Float32Array(orderedViews.length * manifest.dimension);
+	orderedViews.forEach((view, index) => bin.set(view.vector, index * manifest.dimension));
+	const binBuffer = Buffer.from(bin.buffer, bin.byteOffset, bin.byteLength);
 	const record: EmbeddingGenerationRecord = {
 		fragment_id: fragmentId,
 		generation_id: manifest.generation_id,
@@ -508,6 +532,7 @@ export function writeGenerationViews(
 	const nextIndex = { ...readGenerationIndex(manifest.generation_id), [fragmentId]: record };
 	commitGenerationFragmentFiles(manifest.generation_id, fragmentId, [
 		{ livePath: generationMultiviewSidecarPath(manifest.generation_id, fragmentId), content: `${JSON.stringify(sidecar, null, 2)}\n` },
+		{ livePath: generationMultiviewVectorsBinPath(manifest.generation_id, fragmentId), content: binBuffer },
 		{ livePath: generationVectorPath(manifest.generation_id, fragmentId), content: summaryBytes },
 		{ livePath: generationIndexPath(manifest.generation_id), content: `${JSON.stringify(nextIndex, null, 2)}\n` },
 	]);
@@ -519,6 +544,7 @@ export function readGenerationMultiviewViews(
 	fragmentId: string,
 	record: EmbeddingGenerationRecord | undefined,
 	dimension: number,
+	audit: "full" | "light" = "full",
 ): EffectiveMultiviewView[] | null {
 	if (!record || record.state !== "materialized" || !record.views?.length) return null;
 	if (record.views.filter((view) => view.kind === "summary").length !== 1) return null;
@@ -535,26 +561,50 @@ export function readGenerationMultiviewViews(
 			source_content_hash?: string;
 			views?: Record<string, unknown>;
 		};
-		if (sidecar.view_schema_version !== 1 || sidecar.fragment_id !== fragmentId || sidecar.source_content_hash !== record.source_content_hash || !sidecar.views) return null;
+		if ((sidecar.view_schema_version !== 1 && sidecar.view_schema_version !== 2) || sidecar.fragment_id !== fragmentId || sidecar.source_content_hash !== record.source_content_hash || !sidecar.views) return null;
 		const viewIds = record.views.map((view) => view.view_id).sort();
 		const sidecarIds = Object.keys(sidecar.views).sort();
 		if (JSON.stringify(viewIds) !== JSON.stringify(sidecarIds)) return null;
+		// O3：v2 格式向量从 vectors.bin（Float32Array 按 view_id 排序拼接）读取；v1 格式向量内联在 views 值里
+		let binFloats: Float32Array | null = null;
+		if (sidecar.view_schema_version === 2) {
+			const binPath = generationMultiviewVectorsBinPath(generationId, fragmentId);
+			if (!fs.existsSync(binPath)) return null;
+			const binBuffer = fs.readFileSync(binPath);
+			if (binBuffer.byteLength % (dimension * 4) !== 0) return null;
+			binFloats = new Float32Array(binBuffer.buffer, binBuffer.byteOffset, binBuffer.byteLength / 4);
+			if (sidecarIds.length * dimension !== binFloats.length) return null;
+		}
 		const result: EffectiveMultiviewView[] = [];
 		for (const view of record.views) {
-			const vector = sidecar.views[view.view_id];
-			if (!Array.isArray(vector) || vector.length !== dimension || vector.some((item) => typeof item !== "number" || !Number.isFinite(item))) return null;
-			const vectorHash = hashBytes(JSON.stringify(vector));
-			if (vectorHash !== view.vector_hash || view.vector_dimension !== dimension) return null;
-			if (view.kind === "summary") {
-				if (
-					view.view_id !== record.view_id ||
-					record.input_hash !== view.input_hash ||
-					record.vector_hash !== view.vector_hash ||
-					JSON.stringify(vector) !== JSON.stringify(summaryVector) ||
-					canonicalJson(view.source_spans) !== canonicalJson(record.source_spans) ||
-					canonicalJson(view.disclosure) !== canonicalJson(record.disclosure) ||
-					canonicalJson(view.tokens) !== canonicalJson(record.tokens)
-				) return null;
+			let vector: number[];
+			if (sidecar.view_schema_version === 2) {
+				const meta = sidecar.views[view.view_id];
+				if (!meta || typeof meta !== "object") return null;
+				const index = sidecarIds.indexOf(view.view_id);
+				vector = Array.from(binFloats!.subarray(index * dimension, (index + 1) * dimension));
+			} else {
+				const inline = sidecar.views[view.view_id];
+				if (!Array.isArray(inline) || inline.length !== dimension) return null;
+				vector = inline as number[];
+			}
+			if (vector.length !== dimension || vector.some((item) => typeof item !== "number" || !Number.isFinite(item))) return null;
+			// O1 轻量签名：检索热路径（audit="light"）跳过逐视图向量 sha256 重算与 summary 全字段核对（最贵项）；
+			// 完整审计（audit="full"，migrate validate / CI）保留全量校验。维度/结构校验两者都保留。
+			if (audit === "full") {
+				const vectorHash = hashBytes(JSON.stringify(vector));
+				if (vectorHash !== view.vector_hash || view.vector_dimension !== dimension) return null;
+				if (view.kind === "summary") {
+					if (
+						view.view_id !== record.view_id ||
+						record.input_hash !== view.input_hash ||
+						record.vector_hash !== view.vector_hash ||
+						JSON.stringify(vector) !== JSON.stringify(summaryVector) ||
+						canonicalJson(view.source_spans) !== canonicalJson(record.source_spans) ||
+						canonicalJson(view.disclosure) !== canonicalJson(record.disclosure) ||
+						canonicalJson(view.tokens) !== canonicalJson(record.tokens)
+					) return null;
+				}
 			}
 			result.push({
 				fragment_id: fragmentId,

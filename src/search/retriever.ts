@@ -82,7 +82,7 @@ async function loadAllEmbeddings(): Promise<{
 }> {
 	const vectors = new Map<string, LoadedVector>();
 	const multiview = new Map<string, LoadedMultiview>();
-	const { baseGeneration, deltaManifest, index, health } = buildEffectiveEmbeddingView();
+	const { baseGeneration, deltaManifest, index, health } = buildEffectiveEmbeddingView("light");
 	const activeIsMultiview = baseGeneration ? isMultiviewGeneration(baseGeneration) : false;
 	const baseGenerationIndex = activeIsMultiview && baseGeneration
 		? readGenerationIndex(baseGeneration.generation_id)

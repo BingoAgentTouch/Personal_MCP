@@ -80,8 +80,9 @@ function atomicWrite(filePath: string, content: string): void {
 
 export interface DeltaFileOps {
 	mkdirSync: (filePath: string, options?: { recursive?: boolean }) => void;
-	writeFileSync: (filePath: string, content: string, encoding?: BufferEncoding) => void;
-	readFileSync: (filePath: string, encoding: BufferEncoding) => string;
+	// O3：content 支持 Buffer（向量二进制）；encoding 仅在文本时传
+	writeFileSync: (filePath: string, content: string | Buffer, encoding?: BufferEncoding) => void;
+	readFileSync: (filePath: string, encoding?: BufferEncoding) => string | Buffer;
 	renameSync: (source: string, destination: string) => void;
 	unlinkSync: (filePath: string) => void;
 	existsSync: (filePath: string) => boolean;
@@ -123,7 +124,7 @@ function writeDeltaManifestContent(manifest: EmbeddingDeltaManifest): string {
 interface DeltaTransactionTarget {
 	livePath: string;
 	stagedPath: string;
-	originalContent: string | null;
+	originalContent: string | Buffer | null;
 }
 
 function writeTransactionState(
@@ -146,27 +147,27 @@ function rollbackDeltaTransaction(targets: DeltaTransactionTarget[], ops: DeltaF
 		removeIfExists(target.livePath, ops);
 		if (target.originalContent !== null) {
 			ensureDirWithOps(path.dirname(target.livePath), ops);
-			ops.writeFileSync(target.livePath, target.originalContent, "utf8");
+			ops.writeFileSync(target.livePath, target.originalContent, Buffer.isBuffer(target.originalContent) ? undefined : "utf8");
 		}
 	}
 }
 
 function commitMultiviewFiles(
 	fragmentId: string,
-	contents: Array<{ livePath: string; content: string }>,
+	contents: Array<{ livePath: string; content: string | Buffer }>,
 	ops: DeltaFileOps,
 ): void {
 	const transactionRoot = deltaTransactionRoot(nextDeltaTransactionId());
 	const targets: DeltaTransactionTarget[] = contents.map(({ livePath }, index) => ({
 		livePath,
 		stagedPath: path.join(transactionRoot, "staged", `${index}.tmp`),
-		originalContent: ops.existsSync(livePath) ? ops.readFileSync(livePath, "utf8") : null,
+		originalContent: ops.existsSync(livePath) ? ops.readFileSync(livePath) : null,
 	}));
 	try {
 		ensureDirWithOps(path.join(transactionRoot, "staged"), ops);
 		writeTransactionState(transactionRoot, "prepared", targets, ops);
 		for (let index = 0; index < contents.length; index += 1) {
-			ops.writeFileSync(targets[index].stagedPath, contents[index].content, "utf8");
+			ops.writeFileSync(targets[index].stagedPath, contents[index].content, Buffer.isBuffer(contents[index].content) ? undefined : "utf8");
 		}
 		writeTransactionState(transactionRoot, "committing", targets, ops);
 		for (const target of targets) {
@@ -659,6 +660,12 @@ export function multiviewSidecarPath(fragmentId: string): string {
 	return path.join(DELTA_VECTORS_BASE, date, id, "views.json");
 }
 
+/** O3：delta 视图向量二进制文件（view_schema_version=2 的 sidecar 配套，Float32Array 按 view_id 排序拼接）。 */
+export function multiviewVectorsBinPath(fragmentId: string): string {
+	const [date, id] = parseFragmentId(fragmentId);
+	return path.join(DELTA_VECTORS_BASE, date, id, "vectors.bin");
+}
+
 export function upsertDeltaViews(
 	manifest: EmbeddingDeltaManifest,
 	fragmentId: string,
@@ -672,7 +679,9 @@ export function upsertDeltaViews(
 	if (!views.length || views.filter((view) => view.kind === "summary").length !== 1) throw new Error(`multiview materialization requires exactly one summary view for ${fragmentId}`);
 	const ids = new Set<string>();
 	const materialized: EmbeddingMaterializedView[] = [];
-	for (const view of views) {
+	// O3：向量写入前 float32 round-trip（vectors.bin 按 Float32 存储，round-trip 保证读回值与写时一致，full 校验 hash 匹配）
+	const normalizedViews = views.map((view) => ({ ...view, vector: Array.from(new Float32Array(view.vector)) }));
+	for (const view of normalizedViews) {
 		if (!view.view_id || !/^[A-Za-z0-9._-]+$/.test(view.view_id)) throw new Error(`invalid multiview id: ${fragmentId}/${view.view_id}`);
 		if (ids.has(view.view_id)) throw new Error(`duplicate multiview id: ${fragmentId}/${view.view_id}`);
 		ids.add(view.view_id);
@@ -682,14 +691,21 @@ export function upsertDeltaViews(
 	}
 	const index = readDeltaIndex();
 	const summary = views.find((view) => view.kind === "summary")!;
-	const sidecar = { view_schema_version: 1, fragment_id: fragmentId, source_content_hash: sourceHash, views: Object.fromEntries(views.map((view) => [view.view_id, view.vector])) };
-	const summaryBytes = JSON.stringify(summary.vector);
+	const normalizedSummary = normalizedViews.find((view) => view.view_id === summary.view_id)!;
+	// O3 v2 sidecar：views 值存元数据（JSON），向量移入 vectors.bin
+	const sidecar = { view_schema_version: 2, fragment_id: fragmentId, source_content_hash: sourceHash, views: Object.fromEntries(materialized.map((view) => [view.view_id, { kind: view.kind, input_hash: view.input_hash, vector_hash: view.vector_hash, vector_dimension: view.vector_dimension, tokens: view.tokens, source_spans: view.source_spans, disclosure: view.disclosure }])) };
+	const orderedViews = [...normalizedViews].sort((left, right) => left.view_id.localeCompare(right.view_id));
+	const bin = new Float32Array(orderedViews.length * manifestDimension(manifest));
+	orderedViews.forEach((view, index) => bin.set(view.vector, index * manifestDimension(manifest)));
+	const binBuffer = Buffer.from(bin.buffer, bin.byteOffset, bin.byteLength);
+	const summaryBytes = JSON.stringify(normalizedSummary.vector);
 	const record: EmbeddingDeltaRecord = { record_schema_version: 2, delta_id: manifest.delta_id, fragment_id: fragmentId, state: "materialized", operation, view_id: "summary", view_kind: "summary", source_spans: summary.source_spans, disclosure: summary.disclosure, views: materialized, view_set_hash: viewSetHash(materialized), source_content_hash: sourceHash, constructed_input_hash: summary.input_hash, vector_hash: hashBytes(summaryBytes), vector_dimension: summary.vector.length, representation_identity_hash: manifest.representation_identity_hash, tokens: summary.tokens, created_at: nowIso(), failure: null };
 	const nextIndex = { ...index, [fragmentId]: record };
 	const all = Object.values(nextIndex);
 	const nextManifest = { ...manifest, record_count: all.length, materialized_count: all.filter((item) => item.state === "materialized").length, failed_count: all.filter((item) => item.state !== "materialized" && item.state !== "tombstone").length };
 	commitMultiviewFiles(fragmentId, [
 		{ livePath: multiviewSidecarPath(fragmentId), content: `${JSON.stringify(sidecar, null, 2)}\n` },
+		{ livePath: multiviewVectorsBinPath(fragmentId), content: binBuffer },
 		{ livePath: deltaVectorPath(fragmentId), content: summaryBytes },
 		{ livePath: DELTA_INDEX_PATH, content: `${JSON.stringify(nextIndex, null, 2)}\n` },
 		{ livePath: DELTA_MANIFEST_PATH, content: writeDeltaManifestContent(nextManifest) },
@@ -775,7 +791,7 @@ export function writeDeltaTombstone(fragmentId: string, operation: EmbeddingDelt
 	return record;
 }
 
-export function buildEffectiveEmbeddingView(): {
+export function buildEffectiveEmbeddingView(audit: "full" | "light" = "full"): {
 	baseGeneration: EmbeddingGenerationManifest | null;
 	deltaManifest: EmbeddingDeltaManifest | null;
 	index: Map<string, { layer: "base" | "delta"; record: EmbeddingDeltaRecord | null }>;
@@ -805,7 +821,7 @@ export function buildEffectiveEmbeddingView(): {
 				continue;
 			}
 			if (deltaRecord.state === "materialized") {
-				if (active && isMultiviewGeneration(active) && readDeltaMultiviewViews(fragmentId, deltaRecord, active.dimension) === null) {
+				if (active && isMultiviewGeneration(active) && readDeltaMultiviewViews(fragmentId, deltaRecord, active.dimension, audit) === null) {
 						corrupt++;
 						continue;
 					}
@@ -836,38 +852,42 @@ export function buildEffectiveEmbeddingView(): {
 				}
 				if (baseRecord.dimension !== active.dimension) dimensionMismatches++;
 				if (isMultiviewGeneration(active)) {
-						if (readGenerationMultiviewViews(active.generation_id, fragmentId, baseRecord, active.dimension) === null) corrupt++;
+						if (readGenerationMultiviewViews(active.generation_id, fragmentId, baseRecord, active.dimension, audit) === null) corrupt++;
 					} else if (!fs.existsSync(generationVectorPath(active.generation_id, fragmentId))) corrupt++;
-				const fragment = getFragment(fragmentId);
-				if (
-					fragment &&
-					baseRecord.source_content_hash !==
-						sourceContentHash({
-							task_desc: fragment.task_desc,
-							result_desc: fragment.result_desc,
-							tags: fragment.tags,
-							topic_name: fragment.topic_name,
-							turns_text: fragment.turns_text,
-						})
-				) sourceHashMismatches++;
+				if (audit === "full") {
+					const fragment = getFragment(fragmentId);
+					if (
+						fragment &&
+						baseRecord.source_content_hash !==
+							sourceContentHash({
+								task_desc: fragment.task_desc,
+								result_desc: fragment.result_desc,
+								tags: fragment.tags,
+								topic_name: fragment.topic_name,
+								turns_text: fragment.turns_text,
+							})
+					) sourceHashMismatches++;
+				}
 				continue;
 			}
 			if (entry.record) {
 				if (entry.record.representation_identity_hash !== active.representation_identity_hash) identityMismatches++;
 				if (entry.record.vector_dimension !== active.dimension) dimensionMismatches++;
 				if (!fs.existsSync(deltaVectorPath(fragmentId))) corrupt++;
-				const fragment = getFragment(fragmentId);
-				if (
-					fragment &&
-					entry.record.source_content_hash !==
-						sourceContentHash({
-							task_desc: fragment.task_desc,
-							result_desc: fragment.result_desc,
-							tags: fragment.tags,
-							topic_name: fragment.topic_name,
-							turns_text: fragment.turns_text,
-						})
-				) sourceHashMismatches++;
+				if (audit === "full") {
+					const fragment = getFragment(fragmentId);
+					if (
+						fragment &&
+						entry.record.source_content_hash !==
+							sourceContentHash({
+								task_desc: fragment.task_desc,
+								result_desc: fragment.result_desc,
+								tags: fragment.tags,
+								topic_name: fragment.topic_name,
+								turns_text: fragment.turns_text,
+							})
+					) sourceHashMismatches++;
+				}
 			}
 		}
 	}
@@ -2038,6 +2058,7 @@ export function readDeltaMultiviewViews(
 	fragmentId: string,
 	record: EmbeddingDeltaRecord | undefined,
 	dimension: number,
+	audit: "full" | "light" = "full",
 ): EffectiveMultiviewView[] | null {
 	if (!record || record.state !== "materialized" || !record.views?.length || record.views.filter((view) => view.kind === "summary").length !== 1) return null;
 	const summaryVector = readJsonVector(deltaVectorPath(fragmentId));
@@ -2050,17 +2071,41 @@ export function readDeltaMultiviewViews(
 			source_content_hash?: string;
 			views?: Record<string, unknown>;
 		};
-		if (sidecar.view_schema_version !== 1 || sidecar.fragment_id !== fragmentId || sidecar.source_content_hash !== record.source_content_hash || !sidecar.views) return null;
+		if ((sidecar.view_schema_version !== 1 && sidecar.view_schema_version !== 2) || sidecar.fragment_id !== fragmentId || sidecar.source_content_hash !== record.source_content_hash || !sidecar.views) return null;
 		const viewIds = record.views.map((view) => view.view_id).sort();
 		const sidecarIds = Object.keys(sidecar.views).sort();
 		if (JSON.stringify(viewIds) !== JSON.stringify(sidecarIds)) return null;
+		// O3：v2 格式向量从 vectors.bin（Float32Array 按 view_id 排序拼接）读取；v1 格式向量内联在 views 值里
+		let binFloats: Float32Array | null = null;
+		if (sidecar.view_schema_version === 2) {
+			const binPath = multiviewVectorsBinPath(fragmentId);
+			if (!fs.existsSync(binPath)) return null;
+			const binBuffer = fs.readFileSync(binPath);
+			if (binBuffer.byteLength % (dimension * 4) !== 0) return null;
+			binFloats = new Float32Array(binBuffer.buffer, binBuffer.byteOffset, binBuffer.byteLength / 4);
+			if (sidecarIds.length * dimension !== binFloats.length) return null;
+		}
 		const result: EffectiveMultiviewView[] = [];
 		for (const view of record.views) {
-			const vector = sidecar.views[view.view_id];
-			if (!Array.isArray(vector) || vector.length !== dimension || vector.some((item) => typeof item !== "number" || !Number.isFinite(item))) return null;
-			const vectorHash = hashBytes(JSON.stringify(vector));
-			if (vectorHash !== view.vector_hash || view.vector_dimension !== dimension) return null;
-			if (view.kind === "summary" && (vectorHash !== record.vector_hash || JSON.stringify(vector) !== JSON.stringify(summaryVector))) return null;
+			let vector: number[];
+			if (sidecar.view_schema_version === 2) {
+				const meta = sidecar.views[view.view_id];
+				if (!meta || typeof meta !== "object") return null;
+				const index = sidecarIds.indexOf(view.view_id);
+				vector = Array.from(binFloats!.subarray(index * dimension, (index + 1) * dimension));
+			} else {
+				const inline = sidecar.views[view.view_id];
+				if (!Array.isArray(inline) || inline.length !== dimension) return null;
+				vector = inline as number[];
+			}
+			if (vector.length !== dimension || vector.some((item) => typeof item !== "number" || !Number.isFinite(item))) return null;
+			// O1 轻量签名：检索热路径（audit="light"）跳过逐视图向量 sha256 重算（最贵项）；
+			// 完整审计（audit="full"，migrate validate / CI）保留全量校验。维度/结构校验两者都保留。
+			if (audit === "full") {
+				const vectorHash = hashBytes(JSON.stringify(vector));
+				if (vectorHash !== view.vector_hash || view.vector_dimension !== dimension) return null;
+				if (view.kind === "summary" && (vectorHash !== record.vector_hash || JSON.stringify(vector) !== JSON.stringify(summaryVector))) return null;
+			}
 			result.push({ fragment_id: fragmentId, view_id: view.view_id, kind: view.kind, vector, input_hash: view.input_hash, vector_hash: view.vector_hash, vector_dimension: view.vector_dimension, source_spans: view.source_spans, disclosure: view.disclosure });
 		}
 		return result;
