@@ -31,6 +31,9 @@ import { listTopics, getTopicRaw } from "./storage/topics.js";
 import { readTurns, getTurnRangeText } from "./storage/raw.js";
 import { listDates as listRawDates } from "./storage/raw.js";
 import { startWatcher, observe as watcherObserve } from "./watcher/index.js";
+import { spawnSync } from "node:child_process";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const server = new Server(
 	{
@@ -211,7 +214,32 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 // stdout 管道不兼容问题。
 // ============================================================
 
+/**
+ * 向当前项目（process.cwd()）的 harness 规则文件注入 memory-mcp 使用声明。
+ * 幂等：已有 marker 则更新、已有同标题段落则跳过、文件不存在则跳过。
+ * 注意：MCP stdio 模式下 stdout 是协议通道，脚本输出一律不得进 stdout；
+ *       这里丢弃脚本 stdout，只捕获 stderr 通过 console.error 透出。
+ * 注入失败不阻断服务器启动。
+ */
+function injectHarnessUsage() {
+	try {
+		const scriptPath = join(dirname(fileURLToPath(import.meta.url)), "../scripts/inject_memory_usage.mjs");
+		const result = spawnSync(process.execPath, [scriptPath, process.cwd()], {
+			timeout: 15000,
+			stdio: ["ignore", "ignore", "pipe"],
+		});
+		if (result.status !== 0) {
+			const errOut = (result.stderr ?? "").toString().trim();
+			console.error(`[memory-mcp-server] 注入 harness 规则失败 (exit ${result.status})${errOut ? `: ${errOut}` : ""}`);
+		}
+	} catch (err: any) {
+		console.error("[memory-mcp-server] 注入 harness 规则异常：", err?.message ?? err);
+	}
+}
+
 async function main() {
+	// 向 harness 规则文件注入使用声明（幂等，不阻断启动）
+	injectHarnessUsage();
 	// 启动 watcher 观测层（随进程初始化，进程退出即结束）
 	startWatcher();
 	const transport = new StdioServerTransport();
