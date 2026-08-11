@@ -47,12 +47,18 @@ interface WorkMemoryEntry {
 	addedAt: number;
 }
 
-class WorkMemory {
+export class WorkMemory {
 	private query = "";
 	private keywords: string[] = [];
 	private entries: WorkMemoryEntry[] = [];
 	private timer: ReturnType<typeof setTimeout> | null = null;
 	private running = false;
+	/** 检索实现可注入（默认真实 retriever；测试可替换为假实现） */
+	private searchImpl: (query: string, topK: number) => Promise<SearchResults> = search;
+
+	setSearchImpl(fn: (query: string, topK: number) => Promise<SearchResults>): void {
+		this.searchImpl = fn;
+	}
 
 	/** server 启动时调用：清空热文件（会话残留），停止轮询 */
 	init(): void {
@@ -66,8 +72,18 @@ class WorkMemory {
 	/** search 触发：替换主体条目（保留 appended），重算线索，无条件重启调度 */
 	refresh(query: string, results: SearchResults): void {
 		this.query = query;
-		const primary = results.results.slice(0, POLL_TOP_K).map((r) => this.toEntry(r, "primary"));
-		const appended = this.entries.filter((e) => e.kind === "appended");
+		// primary 去重：同一 fragment 只保留第一次命中（retriever 一般不重复，防御性处理）
+		const primaryIds = new Set<string>();
+		const primary: WorkMemoryEntry[] = [];
+		for (const r of results.results.slice(0, POLL_TOP_K)) {
+			if (primaryIds.has(r.fragment_id)) continue;
+			primaryIds.add(r.fragment_id);
+			primary.push(this.toEntry(r, "primary"));
+		}
+		// appended 去重：排除 primary 已包含的 fragment，避免同一记忆「主体 + 追加」双份占预算
+		const appended = this.entries.filter(
+			(e) => e.kind === "appended" && !primaryIds.has(e.fragment_id),
+		);
 		this.entries = [...primary, ...appended];
 		this.recomputeKeywords();
 		this.render(); // trimToBudget：总文件超预算时裁最老 appended 腾空间（保主体）
@@ -119,7 +135,7 @@ class WorkMemory {
 			const existing = new Set(this.entries.map((e) => e.fragment_id));
 			for (const kw of this.keywords) {
 				if (this.appendedChars() >= APPENDED_BUDGET) break;
-				const results = await search(kw, POLL_TOP_K);
+				const results = await this.searchImpl(kw, POLL_TOP_K);
 				for (const r of results.results) {
 					if (this.appendedChars() >= APPENDED_BUDGET) break;
 					if (existing.has(r.fragment_id)) continue;
