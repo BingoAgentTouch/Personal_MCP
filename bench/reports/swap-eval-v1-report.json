@@ -1,0 +1,468 @@
+{
+  "report_schema_version": 1,
+  "report_type": "swap-error-eval-v1",
+  "date": "2026-08-11T08:06:15.743Z",
+  "dataset_id": "interference-v1",
+  "case_count": 18,
+  "configs": {
+    "production": {
+      "description": "retriever.search（竞争门 0.81 + 披露门 + decay_floor 权重）"
+    },
+    "pure_cosine": {
+      "description": "query 编码后与全库 summary 向量余弦 top-1（无权重无 gate）"
+    }
+  },
+  "production": {
+    "correct": 9,
+    "swap": 2,
+    "miss": 7,
+    "recall_at_1": 0.5,
+    "swap_rate_total": 0.1111111111111111,
+    "top3_target_hit": {
+      "hit": 13,
+      "total": 18
+    },
+    "by_sim_bin": {
+      "0.85-0.95": {
+        "total": 5,
+        "correct": 0,
+        "swap": 0,
+        "miss": 5
+      },
+      "0.7-0.85": {
+        "total": 3,
+        "correct": 2,
+        "swap": 0,
+        "miss": 1
+      },
+      "0.5-0.7": {
+        "total": 4,
+        "correct": 3,
+        "swap": 0,
+        "miss": 1
+      },
+      "0.95+": {
+        "total": 6,
+        "correct": 4,
+        "swap": 2,
+        "miss": 0
+      }
+    },
+    "by_type": {
+      "superseded": {
+        "total": 9,
+        "swap": 2
+      },
+      "cross-topic-near": {
+        "total": 2,
+        "swap": 0
+      },
+      "entity-aliasing": {
+        "total": 5,
+        "swap": 0
+      },
+      "control": {
+        "total": 2,
+        "swap": 0
+      }
+    },
+    "cases": [
+      {
+        "pair_id": "swap001",
+        "type": "superseded",
+        "measured_sim": 0.892,
+        "verdict": "miss",
+        "top1": "2026-07-27/frag_003",
+        "top3": [
+          "2026-07-27/frag_003",
+          "2026-08-11/frag_012",
+          "2026-08-11/frag_011"
+        ]
+      },
+      {
+        "pair_id": "swap002",
+        "type": "superseded",
+        "measured_sim": 0.871,
+        "verdict": "miss",
+        "top1": "2026-07-27/frag_003",
+        "top3": [
+          "2026-07-27/frag_003",
+          "2026-08-11/frag_011",
+          "2026-08-11/frag_012"
+        ]
+      },
+      {
+        "pair_id": "swap003",
+        "type": "superseded",
+        "measured_sim": 0.859,
+        "verdict": "miss",
+        "top1": "2026-08-04/frag_003",
+        "top3": [
+          "2026-08-04/frag_003",
+          "2026-08-05/frag_010",
+          "2026-08-08/frag_001"
+        ]
+      },
+      {
+        "pair_id": "swap004",
+        "type": "superseded",
+        "measured_sim": 0.829,
+        "verdict": "correct",
+        "top1": "2026-08-06/frag_005",
+        "top3": [
+          "2026-08-06/frag_005",
+          "2026-08-06/frag_003",
+          "2026-08-11/frag_006"
+        ]
+      },
+      {
+        "pair_id": "swap005",
+        "type": "cross-topic-near",
+        "measured_sim": 0.928,
+        "verdict": "miss",
+        "top1": "2026-07-27/frag_003",
+        "top3": [
+          "2026-07-27/frag_003",
+          "2026-08-06/frag_004",
+          "2026-08-11/frag_004"
+        ]
+      },
+      {
+        "pair_id": "swap006",
+        "type": "cross-topic-near",
+        "measured_sim": 0.881,
+        "verdict": "miss",
+        "top1": "2026-08-11/frag_011",
+        "top3": [
+          "2026-08-11/frag_011",
+          "2026-08-11/frag_012",
+          "2026-07-27/frag_003"
+        ]
+      },
+      {
+        "pair_id": "swap007",
+        "type": "entity-aliasing",
+        "measured_sim": 0.834,
+        "verdict": "correct",
+        "top1": "2026-08-04/frag_008",
+        "top3": [
+          "2026-08-04/frag_008",
+          "2026-08-04/frag_006",
+          "2026-08-04/frag_010"
+        ]
+      },
+      {
+        "pair_id": "swap008",
+        "type": "entity-aliasing",
+        "measured_sim": 0.85,
+        "verdict": "miss",
+        "top1": "2026-07-28/frag_001",
+        "top3": [
+          "2026-07-28/frag_001",
+          "2026-08-04/frag_003",
+          "2026-08-10/frag_002"
+        ]
+      },
+      {
+        "pair_id": "swap009",
+        "type": "entity-aliasing",
+        "measured_sim": 0.692,
+        "verdict": "correct",
+        "top1": "2026-08-04/frag_009",
+        "top3": [
+          "2026-08-04/frag_009",
+          "2026-08-04/frag_005",
+          "2026-07-27/frag_002"
+        ]
+      },
+      {
+        "pair_id": "swap010",
+        "type": "superseded",
+        "measured_sim": 0.606,
+        "verdict": "correct",
+        "top1": "2026-08-05/frag_004",
+        "top3": [
+          "2026-08-05/frag_004",
+          "2026-08-01/frag_001",
+          "2026-08-05/frag_002"
+        ]
+      },
+      {
+        "pair_id": "swap011",
+        "type": "control",
+        "measured_sim": 0.695,
+        "verdict": "correct",
+        "top1": "2026-08-05/frag_002",
+        "top3": [
+          "2026-08-05/frag_002",
+          "2026-08-04/frag_003",
+          "2026-07-29/frag_002"
+        ]
+      },
+      {
+        "pair_id": "swap012",
+        "type": "control",
+        "measured_sim": 0.652,
+        "verdict": "miss",
+        "top1": "2026-08-04/frag_003",
+        "top3": [
+          "2026-08-04/frag_003",
+          "2026-07-31/frag_002",
+          "2026-08-06/frag_004"
+        ]
+      },
+      {
+        "pair_id": "swap013",
+        "type": "superseded",
+        "measured_sim": 0.9731937925172633,
+        "verdict": "swap",
+        "top1": "2026-08-11/frag_002",
+        "top3": [
+          "2026-08-11/frag_002",
+          "2026-08-11/frag_001",
+          "2026-08-11/frag_007"
+        ]
+      },
+      {
+        "pair_id": "swap014",
+        "type": "superseded",
+        "measured_sim": 0.9887962903299587,
+        "verdict": "correct",
+        "top1": "2026-08-11/frag_003",
+        "top3": [
+          "2026-08-11/frag_003",
+          "2026-08-11/frag_004",
+          "2026-08-04/frag_003"
+        ]
+      },
+      {
+        "pair_id": "swap015",
+        "type": "superseded",
+        "measured_sim": 0.9442198022388771,
+        "verdict": "swap",
+        "top1": "2026-08-11/frag_006",
+        "top3": [
+          "2026-08-11/frag_006",
+          "2026-08-11/frag_005",
+          "2026-08-06/frag_004"
+        ]
+      },
+      {
+        "pair_id": "swap016",
+        "type": "superseded",
+        "measured_sim": 0.9867007560392747,
+        "verdict": "correct",
+        "top1": "2026-08-11/frag_007",
+        "top3": [
+          "2026-08-11/frag_007",
+          "2026-08-11/frag_008",
+          "2026-08-11/frag_002"
+        ]
+      },
+      {
+        "pair_id": "swap017",
+        "type": "entity-aliasing",
+        "measured_sim": 0.8582732567468795,
+        "verdict": "correct",
+        "top1": "2026-08-11/frag_009",
+        "top3": [
+          "2026-08-11/frag_009",
+          "2026-08-05/frag_003",
+          "2026-08-11/frag_010"
+        ]
+      },
+      {
+        "pair_id": "swap018",
+        "type": "entity-aliasing",
+        "measured_sim": 0.9723545301466419,
+        "verdict": "correct",
+        "top1": "2026-08-11/frag_011",
+        "top3": [
+          "2026-08-11/frag_011",
+          "2026-08-11/frag_012",
+          "2026-07-31/frag_003"
+        ]
+      }
+    ]
+  },
+  "pure_cosine": {
+    "correct": 10,
+    "swap": 3,
+    "miss": 5,
+    "recall_at_1": 0.5555555555555556,
+    "swap_rate_total": 0.16666666666666666,
+    "by_sim_bin": {
+      "0.85-0.95": {
+        "total": 5,
+        "correct": 1,
+        "swap": 0,
+        "miss": 4
+      },
+      "0.7-0.85": {
+        "total": 3,
+        "correct": 1,
+        "swap": 1,
+        "miss": 1
+      },
+      "0.5-0.7": {
+        "total": 4,
+        "correct": 4,
+        "swap": 0,
+        "miss": 0
+      },
+      "0.95+": {
+        "total": 6,
+        "correct": 4,
+        "swap": 2,
+        "miss": 0
+      }
+    },
+    "by_type": {
+      "superseded": {
+        "total": 9,
+        "swap": 2
+      },
+      "cross-topic-near": {
+        "total": 2,
+        "swap": 0
+      },
+      "entity-aliasing": {
+        "total": 5,
+        "swap": 1
+      },
+      "control": {
+        "total": 2,
+        "swap": 0
+      }
+    },
+    "cases": [
+      {
+        "pair_id": "swap001",
+        "type": "superseded",
+        "measured_sim": 0.892,
+        "verdict": "miss",
+        "top1": "2026-08-11/frag_012"
+      },
+      {
+        "pair_id": "swap002",
+        "type": "superseded",
+        "measured_sim": 0.871,
+        "verdict": "miss",
+        "top1": "2026-08-11/frag_011"
+      },
+      {
+        "pair_id": "swap003",
+        "type": "superseded",
+        "measured_sim": 0.859,
+        "verdict": "correct",
+        "top1": "2026-08-08/frag_001"
+      },
+      {
+        "pair_id": "swap004",
+        "type": "superseded",
+        "measured_sim": 0.829,
+        "verdict": "correct",
+        "top1": "2026-08-06/frag_005"
+      },
+      {
+        "pair_id": "swap005",
+        "type": "cross-topic-near",
+        "measured_sim": 0.928,
+        "verdict": "miss",
+        "top1": "2026-08-11/frag_004"
+      },
+      {
+        "pair_id": "swap006",
+        "type": "cross-topic-near",
+        "measured_sim": 0.881,
+        "verdict": "miss",
+        "top1": "2026-08-11/frag_011"
+      },
+      {
+        "pair_id": "swap007",
+        "type": "entity-aliasing",
+        "measured_sim": 0.834,
+        "verdict": "swap",
+        "top1": "2026-08-04/frag_006"
+      },
+      {
+        "pair_id": "swap008",
+        "type": "entity-aliasing",
+        "measured_sim": 0.85,
+        "verdict": "miss",
+        "top1": "2026-07-28/frag_001"
+      },
+      {
+        "pair_id": "swap009",
+        "type": "entity-aliasing",
+        "measured_sim": 0.692,
+        "verdict": "correct",
+        "top1": "2026-08-04/frag_009"
+      },
+      {
+        "pair_id": "swap010",
+        "type": "superseded",
+        "measured_sim": 0.606,
+        "verdict": "correct",
+        "top1": "2026-08-05/frag_004"
+      },
+      {
+        "pair_id": "swap011",
+        "type": "control",
+        "measured_sim": 0.695,
+        "verdict": "correct",
+        "top1": "2026-08-05/frag_002"
+      },
+      {
+        "pair_id": "swap012",
+        "type": "control",
+        "measured_sim": 0.652,
+        "verdict": "correct",
+        "top1": "2026-08-04/frag_001"
+      },
+      {
+        "pair_id": "swap013",
+        "type": "superseded",
+        "measured_sim": 0.9731937925172633,
+        "verdict": "swap",
+        "top1": "2026-08-11/frag_002"
+      },
+      {
+        "pair_id": "swap014",
+        "type": "superseded",
+        "measured_sim": 0.9887962903299587,
+        "verdict": "correct",
+        "top1": "2026-08-11/frag_003"
+      },
+      {
+        "pair_id": "swap015",
+        "type": "superseded",
+        "measured_sim": 0.9442198022388771,
+        "verdict": "swap",
+        "top1": "2026-08-11/frag_006"
+      },
+      {
+        "pair_id": "swap016",
+        "type": "superseded",
+        "measured_sim": 0.9867007560392747,
+        "verdict": "correct",
+        "top1": "2026-08-11/frag_007"
+      },
+      {
+        "pair_id": "swap017",
+        "type": "entity-aliasing",
+        "measured_sim": 0.8582732567468795,
+        "verdict": "correct",
+        "top1": "2026-08-11/frag_009"
+      },
+      {
+        "pair_id": "swap018",
+        "type": "entity-aliasing",
+        "measured_sim": 0.9723545301466419,
+        "verdict": "correct",
+        "top1": "2026-08-11/frag_011"
+      }
+    ]
+  },
+  "note": "swap = top-1 取到配对的 distractor。miss = top-1 是无关片段（多为聚合型片段截胡：07-27 设计稿/08-04 教训总结/07-28 活动日志）。0.95 档未覆盖（需合成片段临时库，下一步）。"
+}

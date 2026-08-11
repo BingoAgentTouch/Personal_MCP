@@ -1,0 +1,212 @@
+{
+  "dataset_schema_version": 1,
+  "dataset_id": "interference-v1",
+  "dataset_type": "swap-error-interference",
+  "note": "干扰场景评估集：构造语义相近但内容不同的 target/distractor 对，测 top-1 交换率。查询=target 的独特信息（去掉与 distractor 共享的部分）。真实库配对（sim 为实测 summary 余弦），0.95 档合成片段待临时库。",
+  "cases": [
+    {
+      "pair_id": "swap001",
+      "type": "superseded",
+      "sim_bin": "0.85-0.95",
+      "measured_sim": 0.892,
+      "target_id": "2026-08-09/frag_001",
+      "distractor_id": "2026-08-08/frag_004",
+      "query": "1F 大厅美术最终部署用的背景图是哪张、Sprite2D 放在什么位置、瓦片重铺了多少格",
+      "expected_top1": "2026-08-09/frag_001",
+      "comment": "同主题近重复：08-09 生成部署（building_1f_bg.png、pos 279.5,189.5、89 格）vs 08-08 设计阶段（线框方案 B、三源同根，无部署结果）。"
+    },
+    {
+      "pair_id": "swap002",
+      "type": "superseded",
+      "sim_bin": "0.85-0.95",
+      "measured_sim": 0.871,
+      "target_id": "2026-08-10/frag_001",
+      "distractor_id": "2026-08-09/frag_001",
+      "query": "1F 大厅背景图改成 1:1 显示时 scale 从多少调到多少、楼层导航 bug 靠 level.gd 的什么新属性修的",
+      "expected_top1": "2026-08-10/frag_001",
+      "comment": "同主题近重复：08-10 三连修（v7 扩展 +47%、scale 0.45→1.0、floor_number）vs 08-09 生成部署（v6 定稿）。"
+    },
+    {
+      "pair_id": "swap003",
+      "type": "superseded",
+      "sim_bin": "0.85-0.95",
+      "measured_sim": 0.859,
+      "target_id": "2026-08-08/frag_001",
+      "distractor_id": "2026-08-05/frag_006",
+      "query": "20F 楼层场景重写成继承模板后从多少行变到多少行、禁上行是用什么 process_mode 实现的",
+      "expected_top1": "2026-08-08/frag_001",
+      "comment": "同主题近重复：08-08 20F 具体改造（179→33 行、D4 process_mode=4）vs 08-05 通用模板迁移（DataManager 接口、transfer.gd floor_delta）。"
+    },
+    {
+      "pair_id": "swap004",
+      "type": "superseded",
+      "sim_bin": "0.7-0.85",
+      "measured_sim": 0.829,
+      "target_id": "2026-08-06/frag_005",
+      "distractor_id": "2026-08-06/frag_004",
+      "query": "生图工具链固定脚本 image_api.mjs 有哪四个子命令、edits 端点实测对哪种指令可靠",
+      "expected_top1": "2026-08-06/frag_005",
+      "comment": "同主题近重复：08-06 工具链升级（gen/see/edit/models、edits 可用）vs 同日文档更新（AGENTS.md 重写、curl 示例）。"
+    },
+    {
+      "pair_id": "swap005",
+      "type": "cross-topic-near",
+      "sim_bin": "0.85-0.95",
+      "measured_sim": 0.928,
+      "target_id": "2026-08-09/frag_001",
+      "distractor_id": "2026-08-06/frag_002",
+      "query": "1F 大厅美术六版迭代 v6 定稿时的关键认知是什么、部署策略选了什么",
+      "expected_top1": "2026-08-09/frag_001",
+      "comment": "跨主题近相似（最高档）：1F 大厅美术生成 vs home 家场景美术改造（gpt-image-1 三版 v3、四功能区、21x12 格）。查询聚焦 1F 的六版迭代认知。"
+    },
+    {
+      "pair_id": "swap006",
+      "type": "cross-topic-near",
+      "sim_bin": "0.85-0.95",
+      "measured_sim": 0.881,
+      "target_id": "2026-08-10/frag_001",
+      "distractor_id": "2026-08-08/frag_001",
+      "query": "1F 大厅三连修里背景图 v7 扩展后空间感提升多少、为什么旧瓦片要清空",
+      "expected_top1": "2026-08-10/frag_001",
+      "comment": "跨主题近相似：1F 三连修 vs 20F 模板化改造（继承、33 行、P1 覆盖）。"
+    },
+    {
+      "pair_id": "swap007",
+      "type": "entity-aliasing",
+      "sim_bin": "0.7-0.85",
+      "measured_sim": 0.834,
+      "target_id": "2026-08-04/frag_008",
+      "distractor_id": "2026-08-04/frag_006",
+      "query": "全场景自动化回归测试一共跑了几场景几用例、通过率是多少",
+      "expected_top1": "2026-08-04/frag_008",
+      "comment": "实体混叠：同为「自动化测试」主题（回归报告 5 场景 10 用例 90% vs 实操流程文档 600px/s、背包计数 0）。"
+    },
+    {
+      "pair_id": "swap008",
+      "type": "entity-aliasing",
+      "sim_bin": "0.7-0.85",
+      "measured_sim": 0.85,
+      "target_id": "2026-08-10/frag_002",
+      "distractor_id": "2026-08-05/frag_005",
+      "query": "Claude Code 的记忆系统由什么构成、memory-mcp 的注入脚本有哪四种状态",
+      "expected_top1": "2026-08-10/frag_002",
+      "comment": "实体混叠：同为「工具/LLM 建设」类（记忆系统研究 vs 代码审查工具超时修复）。"
+    },
+    {
+      "pair_id": "swap009",
+      "type": "entity-aliasing",
+      "sim_bin": "0.5-0.7",
+      "measured_sim": 0.692,
+      "target_id": "2026-08-04/frag_009",
+      "distractor_id": "2026-08-04/frag_005",
+      "query": "Hera 两个观测盲区是怎么修的、game_inspector.gd 设置了什么 process_mode",
+      "expected_top1": "2026-08-04/frag_009",
+      "comment": "实体混叠：同为 Hera 自动化（盲区修复 vs 闭环实测）。"
+    },
+    {
+      "pair_id": "swap010",
+      "type": "superseded",
+      "sim_bin": "0.5-0.7",
+      "measured_sim": 0.606,
+      "target_id": "2026-08-05/frag_004",
+      "distractor_id": "2026-07-26/frag_002",
+      "query": "移动中触发对话后残留输入驱动角色的根因是什么、修复时除了清输入还清了什么",
+      "expected_top1": "2026-08-05/frag_004",
+      "comment": "同主题对话 Bug 迭代：08-05 velocity 惯性根因（_freeze_controls 清 velocity）vs 07-26 pause 属性未用。"
+    },
+    {
+      "pair_id": "swap011",
+      "type": "control",
+      "sim_bin": "0.5-0.7",
+      "measured_sim": 0.695,
+      "target_id": "2026-08-05/frag_002",
+      "distractor_id": "2026-08-05/frag_004",
+      "query": "对话触发系统设计 v1.1 落地时发现 Callable 检查器不可编辑后改用了什么资源体系",
+      "expected_top1": "2026-08-05/frag_002",
+      "comment": "0.5 档对照：同主题不同子任务（触发系统实现 vs Bug 修复），不该取错。"
+    },
+    {
+      "pair_id": "swap012",
+      "type": "control",
+      "sim_bin": "0.5-0.7",
+      "measured_sim": 0.652,
+      "target_id": "2026-08-04/frag_001",
+      "distractor_id": "2026-08-04/frag_002",
+      "query": "组织架构更新后本项目 MCP 需不需要更新、结论是什么",
+      "expected_top1": "2026-08-04/frag_001",
+      "comment": "0.5 档对照：同主题记忆系统维护（架构迁移检查 vs 写链路修复），不该取错。"
+    },
+    {
+      "pair_id": "swap013",
+      "type": "superseded",
+      "synthetic": true,
+      "sim_bin": "0.95+",
+      "measured_sim": null,
+      "target_id": "2026-08-11/frag_001",
+      "distractor_id": "2026-08-11/frag_002",
+      "query": "现在生产服务器用的 IP 是哪个",
+      "expected_top1": "2026-08-11/frag_001",
+      "comment": "合成 0.95 档：服务器 IP 新旧版本（192.168.1.50 vs 192.168.1.40），几乎同义仅值不同。"
+    },
+    {
+      "pair_id": "swap014",
+      "type": "superseded",
+      "synthetic": true,
+      "sim_bin": "0.95+",
+      "measured_sim": null,
+      "target_id": "2026-08-11/frag_003",
+      "distractor_id": "2026-08-11/frag_004",
+      "query": "项目A 八月执行版批准的开发预算是多少",
+      "expected_top1": "2026-08-11/frag_003",
+      "comment": "合成 0.95 档：项目预算新旧版本（50 万 vs 80 万）。"
+    },
+    {
+      "pair_id": "swap015",
+      "type": "superseded",
+      "synthetic": true,
+      "sim_bin": "0.95+",
+      "measured_sim": null,
+      "target_id": "2026-08-11/frag_005",
+      "distractor_id": "2026-08-11/frag_006",
+      "query": "当前生图主力模型是哪一个",
+      "expected_top1": "2026-08-11/frag_005",
+      "comment": "合成 0.95 档：生图模型切换（gpt-image-2 vs gpt-image-1）。"
+    },
+    {
+      "pair_id": "swap016",
+      "type": "superseded",
+      "synthetic": true,
+      "sim_bin": "0.95+",
+      "measured_sim": null,
+      "target_id": "2026-08-11/frag_007",
+      "distractor_id": "2026-08-11/frag_008",
+      "query": "Hera 当前的连接地址和端口是什么",
+      "expected_top1": "2026-08-11/frag_007",
+      "comment": "合成 0.95 档：Hera 连接配置变更（8765 vs 8080）。"
+    },
+    {
+      "pair_id": "swap017",
+      "type": "entity-aliasing",
+      "synthetic": true,
+      "sim_bin": "0.95+",
+      "measured_sim": null,
+      "target_id": "2026-08-11/frag_009",
+      "distractor_id": "2026-08-11/frag_010",
+      "query": "模板里的 HomeDoor 是不是玩家家门入口带交互区",
+      "expected_top1": "2026-08-11/frag_009",
+      "comment": "合成 0.95 档：同一节点不同事实（家门入口 vs 装饰门）。"
+    },
+    {
+      "pair_id": "swap018",
+      "type": "entity-aliasing",
+      "synthetic": true,
+      "sim_bin": "0.95+",
+      "measured_sim": null,
+      "target_id": "2026-08-11/frag_011",
+      "distractor_id": "2026-08-11/frag_012",
+      "query": "1F 楼层有没有保安室",
+      "expected_top1": "2026-08-11/frag_011",
+      "comment": "合成 0.95 档：特殊楼层标记（有保安室 vs 无保安室）。"
+    }
+  ]
+}
