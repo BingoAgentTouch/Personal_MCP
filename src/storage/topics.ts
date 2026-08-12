@@ -27,7 +27,10 @@ function parseTopicMD(md: string, name: string): TopicIndexMeta | null {
 	if (!titleMatch) return null;
 	const statusMatch = md.match(/\*\*状态\*\*[：:]\s*(.+)/);
 	const entries: TopicEntry[] = [];
-	const entryRe = /^- (\d{4}-\d{2}-\d{2})[：:]\s*(.+?)（[^）\n]*→\s*([^）]*)）/gm;
+	// 锚定行尾链接格式「（→ daily/日期.md → fragment_id）」，避免 summary 内嵌
+	// 「（A→B）」模式（如「（179→33 行）」「（-1→0，...）」）被贪婪匹配截胡，
+	// 导致 fragment_id 解析成垃圾文本（真实库 2026-08-12 实测 3 条污染即此因）。
+	const entryRe = /^- (\d{4}-\d{2}-\d{2})[：:]\s*(.+?)（→ daily\/[\d-]+\.md →\s*([^）]*?)）\s*$/gm;
 	let match: RegExpExecArray | null;
 	while ((match = entryRe.exec(md)) !== null) entries.push({ date: match[1], fragment_id: match[3].trim(), summary: match[2].trim() });
 	const constraints: string[] = [];
