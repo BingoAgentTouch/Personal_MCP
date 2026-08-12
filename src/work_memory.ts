@@ -127,6 +127,11 @@ export class WorkMemory {
 			this.timer = null;
 			void this.poll();
 		}, this.nextIntervalMs());
+		// unref：后台轮询不应阻止进程退出。测试/一次性脚本场景下事件循环
+		// 清空即退出；server 场景（stdio 等活跃句柄存在）定时器照常触发。
+		// 修复前：refresh → schedule → poll → finally 再 schedule 形成无限循环，
+		// 任何 handleSearch 调用后进程永不退出（全量测试卡死 30 分钟的根因）。
+		this.timer.unref();
 	}
 
 	private async poll(): Promise<void> {
