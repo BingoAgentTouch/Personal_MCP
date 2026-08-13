@@ -9,7 +9,6 @@ MCP 工具名称为 `memory-*`，已在 `{{settings_path}}` 中注册。
 - 该文件由 memory-mcp 后台持续维护：search 触发主体条目替换，后台定时轮询追加相关记忆
 - 内容为「相关记忆的摘要 + 路径」，可直接消费摘要，深挖用 `memory_get_fragment(<fragment_id>)`
 - 文件限大小（预算内），注满即停；新一轮 search 会替换主体条目
-- 若你所在环境已通过 hook 自动注入本文件内容（如 Claude Code 的 UserPromptSubmit hook），直接消费注入内容即可，无需再主动 Read
 
 ## 回答前 → 查记忆
 

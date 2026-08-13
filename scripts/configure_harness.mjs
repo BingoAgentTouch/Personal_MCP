@@ -11,16 +11,15 @@
  *
  * 选项：
  *   --harness LIST      逗号分隔的 harness 名（默认 claude-code；支持 claude-code / deepcode）
- *   --docs-path PATH    注入规则时引用的「更多用法」文档路径（可选）
  *   --dry-run           只报告将要做什么，不写文件
  *
  * 各 harness 生成物：
- *   claude-code  → ① .mcp.json（MCP 注册）② CLAUDE.md（规则注入）③ .claude/settings.json（UserPromptSubmit hook）④ .claude/settings.local.json（权限全 allow）
- *   deepcode     → 已接入（.deepcode/settings.json + AGENTS.md），仅提示无需改动
+ *   claude-code  → ① .mcp.json（MCP 注册）② .claude/settings.json（UserPromptSubmit hook，自动注入 work_memory.md）③ .claude/settings.local.json（权限全 allow）
+ *                  ⚠️ 不写规则文件（CLAUDE.md）：热工作记忆靠 hook 自动注入，避免「hook 注入 + 主动 Read」双份重复
+ *   deepcode     → 已接入（.deepcode/settings.json + AGENTS.md 主动 Read 规则），无需改动
  *
- * 复用：规则文件注入（CLAUDE.md）委托给 inject_memory_usage.mjs（子进程调用，幂等四态不变）。
+ * 注：规则文件（AGENTS.md）由 inject_memory_usage.mjs 单独维护，本脚本不重复写入。
  */
-import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +28,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // memory-mcp-server 仓库根（scripts/ 的上一级），据此推导 dist/index.js 与 hook 脚本路径，避免硬编码
 const REPO_ROOT = resolve(__dirname, "..");
 const DIST_INDEX = join(REPO_ROOT, "dist", "index.js");
-const INJECT_SCRIPT = join(__dirname, "inject_memory_usage.mjs");
 // hook 命令会被 Claude Code 以 shell:true 执行（Windows 走 cmd.exe），反斜杠会被吃掉 → 必须正斜杠
 const HOOK_SCRIPT = join(__dirname, "claude_hook_work_memory.mjs").replace(/\\/g, "/");
 
@@ -49,12 +47,11 @@ const MEMORY_TOOLS = [
 ];
 
 function parseArgs(argv) {
-  const args = { projectRoot: ".", harness: ["claude-code"], docsPath: null, dryRun: false };
+  const args = { projectRoot: ".", harness: ["claude-code"], dryRun: false };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--harness") args.harness = argv[++i].split(",").map((s) => s.trim()).filter(Boolean);
-    else if (a === "--docs-path") args.docsPath = argv[++i];
     else if (a === "--dry-run") args.dryRun = true;
     else rest.push(a);
   }
@@ -67,26 +64,6 @@ function writeJson(file, data, opts) {
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(data, null, 2) + "\n", "utf8");
   }
-}
-
-/** 规则文件不存在时先创建空文件（inject 的幂等策略对不存在文件是 skip，不创建） */
-function ensureRuleFile(root, relPath, opts) {
-  const file = join(root, relPath);
-  if (existsSync(file)) return;
-  console.log(`  [create] ${relPath}  空文件（供注入，inject 对不存在文件默认 skip）`);
-  if (!opts.dryRun) writeFileSync(file, "", "utf8");
-}
-
-/** 规则文件注入（复用 inject_memory_usage.mjs） */
-function runInject(root, extraArgs, opts, label) {
-  const args = [INJECT_SCRIPT, root, ...extraArgs];
-  if (opts.docsPath) args.push("--docs-path", opts.docsPath);
-  console.log(`  [inject] ${label}（复用 inject_memory_usage.mjs）`);
-  if (opts.dryRun) {
-    console.log(`    (dry-run) 命令：node ${args.join(" ")}`);
-    return;
-  }
-  execFileSync("node", args, { stdio: "inherit" });
 }
 
 /** ① .mcp.json（MCP 注册） */
@@ -108,7 +85,7 @@ function ensureMcpJson(root, opts) {
   }
 }
 
-/** ③ .claude/settings.json（UserPromptSubmit hook） */
+/** ② .claude/settings.json（UserPromptSubmit hook） */
 function ensureHooksSettings(root, opts) {
   const file = join(root, ".claude", "settings.json");
   const hookEntry = { type: "command", command: `node ${HOOK_SCRIPT}` };
@@ -137,7 +114,7 @@ function ensureHooksSettings(root, opts) {
   console.log("  [inject] .claude/settings.json  UserPromptSubmit hook");
 }
 
-/** ④ .claude/settings.local.json（权限全 allow） */
+/** ③ .claude/settings.local.json（权限全 allow） */
 function ensurePermissions(root, opts) {
   const file = join(root, ".claude", "settings.local.json");
   let settings = {};
@@ -160,15 +137,13 @@ function ensurePermissions(root, opts) {
 
 function configureClaudeCode(root, opts) {
   ensureMcpJson(root, opts);
-  ensureRuleFile(root, "CLAUDE.md", opts);
-  runInject(root, ["--files", "CLAUDE.md", "--settings-path", ".mcp.json"], opts, "CLAUDE.md 规则注入");
   ensureHooksSettings(root, opts);
   ensurePermissions(root, opts);
 }
 
 function configureDeepCode(root, opts) {
-  // Deep Code 已接入：.deepcode/settings.json（MCP 注册）+ AGENTS.md（规则 marker 区块已存在）
-  console.log("  [skip ] Deep Code 已接入（.deepcode/settings.json + AGENTS.md），无需改动");
+  // Deep Code 已接入：.deepcode/settings.json（MCP 注册）+ AGENTS.md（主动 Read 规则，手动维护）
+  console.log("  [skip ] Deep Code 已接入（.deepcode/settings.json + AGENTS.md 主动 Read 规则），无需改动");
 }
 
 const ACTIONS = { "claude-code": configureClaudeCode, deepcode: configureDeepCode };
