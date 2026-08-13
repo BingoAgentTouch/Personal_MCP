@@ -30,7 +30,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 const DIST_INDEX = join(REPO_ROOT, "dist", "index.js");
 const INJECT_SCRIPT = join(__dirname, "inject_memory_usage.mjs");
-const HOOK_SCRIPT = join(__dirname, "claude_hook_work_memory.mjs");
+// hook 命令会被 Claude Code 以 shell:true 执行（Windows 走 cmd.exe），反斜杠会被吃掉 → 必须正斜杠
+const HOOK_SCRIPT = join(__dirname, "claude_hook_work_memory.mjs").replace(/\\/g, "/");
 
 // memory-mcp 全部工具（权限全 allow，用户 2026-08-13 拍板）
 const MEMORY_TOOLS = [
@@ -117,9 +118,18 @@ function ensureHooksSettings(root, opts) {
   }
   settings.hooks = settings.hooks || {};
   const existing = settings.hooks.UserPromptSubmit || [];
-  const alreadyHas = existing.some((g) => (g.hooks || []).some((h) => h.command === hookEntry.command));
-  if (alreadyHas) {
-    console.log("  [skip ] .claude/settings.json  UserPromptSubmit hook 已存在");
+  // 幂等：已含 claude_hook_work_memory 的 hook 时，command 相同→skip，不同（如反斜杠→正斜杠）→更新
+  const idx = existing.findIndex((g) => (g.hooks || []).some((h) => (h.command || "").includes("claude_hook_work_memory")));
+  if (idx !== -1) {
+    if (existing[idx].hooks?.[0]?.command === hookEntry.command) {
+      console.log("  [skip ] .claude/settings.json  UserPromptSubmit hook 已存在");
+      return;
+    }
+    const updated = [...existing];
+    updated[idx] = { matcher: "", hooks: [hookEntry] };
+    settings.hooks.UserPromptSubmit = updated;
+    writeJson(file, settings, opts);
+    console.log("  [update] .claude/settings.json  UserPromptSubmit hook command（正斜杠化）");
     return;
   }
   settings.hooks.UserPromptSubmit = [...existing, { matcher: "", hooks: [hookEntry] }];
