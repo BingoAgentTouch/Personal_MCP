@@ -35,9 +35,11 @@ const BEGIN_MARKER = "<!-- BEGIN memory-mcp-usage -->";
 const END_MARKER = "<!-- END memory-mcp-usage -->";
 
 // 常见 harness 规则文件（按优先级排列；脚本只处理存在的）
+// 注：CLAUDE.md 已从默认列表移除（2026-08-13）：Claude Code 靠 UserPromptSubmit hook
+//     自动注入热工作记忆，规则文件里写「主动 Read」会导致 hook 注入 + 主动 Read 双份重复。
+//     如需显式注入 CLAUDE.md，用 --files CLAUDE.md 指定。
 const DEFAULT_FILES = [
   "AGENTS.md", // OpenAI Codex / Deep Code / 多数通用 agent
-  "CLAUDE.md", // Claude Code
   "GEMINI.md", // Gemini CLI
   ".clinerules", // Cline / Roo Code
   ".cursorrules", // Cursor（旧式）
