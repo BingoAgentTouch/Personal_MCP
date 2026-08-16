@@ -4,7 +4,7 @@
  * 机制：
  *  - LLM 每次 memory_search 触发 refresh()：把最新命中的条目作为「主体」（primary）
  *    替换进热文件，保留之前后台轮询追加的条目（appended）。
- *  - 后台定时轮询（动态间隔：appended 越满轮询越慢，3s → 15min 平方曲线）：
+ *  - 后台定时轮询（固定 300ms 间隔）：
  *    通道⓪ 先查联想链（work_memory_links.json，深度=1 直接出边邻居），
  *    再走通道①关键词语义检索（最近 query + 已注入条目的 topic_name），
  *    两条通道共同发现新的相关记忆，追加摘要 + 路径。
@@ -37,9 +37,8 @@ const MAX_TOKENS = 5120;
 /** appended（主体外条目）预算：轮询停止阈值（主体不占预算） */
 const APPENDED_BUDGET = MAX_TOKENS * 2;
 
-/** 动态轮询间隔：appended 空 3s，达预算 15min（平方曲线） */
-const MIN_INTERVAL_MS = 3_000;
-const MAX_INTERVAL_MS = 900_000;
+/** 固定轮询间隔（原动态 3s→15min 平方曲线已过时，2026-08-16 改固定 300ms） */
+const POLL_INTERVAL_MS = 300;
 
 /** 每轮轮询每个关键词取几条；search 触发时主体条目数 */
 const POLL_TOP_K = 5;
@@ -134,12 +133,6 @@ export class WorkMemory {
 		this.keywords = [this.query, ...Array.from(topics)].map((k) => k.trim()).filter(Boolean);
 	}
 
-	/** 动态间隔：appended 填充 0→1 映射 3s→15min（平方曲线：低填充区接近 3s 快速积累，越满越慢） */
-	private nextIntervalMs(): number {
-		const fill = Math.min(1, this.appendedChars() / APPENDED_BUDGET);
-		return Math.round(MIN_INTERVAL_MS + (MAX_INTERVAL_MS - MIN_INTERVAL_MS) * fill * fill);
-	}
-
 	/** appended 是否曾触达预算线（追加后检测）。trimToBudget 的裁剪条件（> 预算）
 	 *  与 schedule 停轮询条件（>= 预算）之间存在缝隙：追加 → 超线 → trim 裁回线内
 	 *  → 永远 < 预算 → 「存满」几乎不可达。故以「曾触顶」作为存满信号。 */
@@ -156,7 +149,7 @@ export class WorkMemory {
 		this.timer = setTimeout(() => {
 			this.timer = null;
 			void this.poll();
-		}, this.nextIntervalMs());
+		}, POLL_INTERVAL_MS);
 		// unref：后台轮询不应阻止进程退出。测试/一次性脚本场景下事件循环
 		// 清空即退出；server 场景（stdio 等活跃句柄存在）定时器照常触发。
 		// 修复前：refresh → schedule → poll → finally 再 schedule 形成无限循环，
@@ -277,12 +270,11 @@ export class WorkMemory {
 		const now = new Date().toISOString();
 		// 头部展示：appended 填充率（主体不占轮询预算）
 		const fill = Math.min(1, this.appendedChars() / APPENDED_BUDGET);
-		const interval = this.nextIntervalMs();
 		const lines: string[] = [
 			"# 热工作记忆（Hot Working Memory）",
 			"",
 			"> 由 memory-mcp 自动维护 · 检索记忆后请主动 Read 本文件（摘要 + 路径，深挖用 memory_get_fragment）",
-			`> 更新：${now} · 联想填充 ${Math.round(fill * 100)}%（预算 ${MAX_TOKENS} tokens） · 轮询间隔 ${interval}ms`,
+			`> 更新：${now} · 联想填充 ${Math.round(fill * 100)}%（预算 ${MAX_TOKENS} tokens） · 轮询间隔 ${POLL_INTERVAL_MS}ms`,
 			"",
 			"## 当前线索",
 			"",
