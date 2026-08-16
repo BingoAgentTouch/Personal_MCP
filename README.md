@@ -38,12 +38,12 @@ npm run build      # tsc → dist/
 
 要求 Node ≥ 20(开发用 22 验证)。
 
-### 从 npm 安装（发布后）
+### 从 npm 安装
 
 ```bash
-npm install -g @<你的scope>/memory-mcp-server     # 全局安装（包名以实际发布为准）
-memory-mcp                                        # 直接以 stdio 启动
-# 或临时运行：npx @<你的scope>/memory-mcp-server
+npm install -g @bingo_touth/memory-mcp-server   # 全局安装
+memory-mcp                                      # 直接以 stdio 启动
+# 或临时运行：npx @bingo_touth/memory-mcp-server
 ```
 
 > 发布者注意：npm 裸名 `memory-mcp-server` / `memory-mcp` 均已被占用，发布前必须把 `package.json` 的 `name` 改为 scoped 名（`@<你的npm用户名>/memory-mcp-server`）并 `npm login` 后 `npm publish --access public`。

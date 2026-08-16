@@ -1,5 +1,5 @@
 {
-  "name": "memory-mcp-server",
+  "name": "@bingo_touth/memory-mcp-server",
   "version": "0.9.1",
   "private": false,
   "type": "module",
