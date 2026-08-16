@@ -35,11 +35,12 @@ import { workMemory } from "./work_memory.js";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { VERSION } from "./version.js";
 
 const server = new Server(
 	{
 		name: "memory-mcp-server",
-		version: "0.1.0",
+		version: VERSION,
 	},
 	{
 		capabilities: {

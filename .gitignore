@@ -6,6 +6,9 @@ node_modules/
 # tsc 输出；clone 后用 `npm run build` 生成
 dist/
 
+# 由 scripts/inject-version.mjs 生成的版本号（单一来源为 package.json）
+src/version.ts
+
 # ── 记忆数据（若 MCP 从本目录启动会在此落盘）────────────
 memory/
 
