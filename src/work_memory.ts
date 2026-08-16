@@ -43,6 +43,10 @@ const POLL_INTERVAL_MS = 300;
 /** 每轮轮询每个关键词取几条；search 触发时主体条目数 */
 const POLL_TOP_K = 5;
 
+/** 收敛守卫：连续 N 轮 poll 零新增条目 → 视为「已填满可及范围」，
+ *  触发建链并停轮询（兜底：小库/窄主题填不满 10240 预算时，避免 300ms 死循环）。 */
+const CONVERGENCE_ROUNDS = 2;
+
 type EntryKind = "primary" | "appended";
 
 interface WorkMemoryEntry {
@@ -75,6 +79,7 @@ export class WorkMemory {
 		this.keywords = [];
 		this.budgetReached = false;
 		this.linkBuildInFlight = false;
+		this.noGrowthRounds = 0;
 		this.render();
 	}
 
@@ -95,6 +100,7 @@ export class WorkMemory {
 		);
 		this.entries = [...primary, ...appended];
 		this.recomputeKeywords();
+		this.noGrowthRounds = 0; // 新检索重置收敛计数（新 query/主题会带来新可及范围）
 		this.render(); // trimToBudget：总文件超预算时裁最老 appended 腾空间（保主体）
 		// 重置调度：search 一触发就重新开始轮询（appended 是否还能积累由 schedule 内判断）
 		if (this.timer) {
@@ -140,11 +146,19 @@ export class WorkMemory {
 	 *  → 永远 < 预算 → 「存满」几乎不可达。故以「曾触顶」作为存满信号。 */
 	private budgetReached = false;
 
+	/** 连续零新增的 poll 轮数（收敛守卫：≥ CONVERGENCE_ROUNDS 即触发建链并停轮询） */
+	private noGrowthRounds = 0;
+
 	private schedule(): void {
 		if (this.timer) return; // 已有待触发 timer（poll 末尾的 schedule 会被 refresh 的 timer 挡住）
-		if (this.appendedChars() >= APPENDED_BUDGET || this.budgetReached) {
-			// appended 满预算（或曾触顶）：停轮询，直到下次 search；此时触发异步建链（阶段二）
+		if (
+			this.appendedChars() >= APPENDED_BUDGET ||
+			this.budgetReached ||
+			this.noGrowthRounds >= CONVERGENCE_ROUNDS
+		) {
+			// appended 满预算（或曾触顶，或连续若干轮零新增已收敛）：停轮询，触发异步建链（阶段二）
 			this.budgetReached = false;
+			this.noGrowthRounds = 0;
 			this.maybeTriggerLinkBuild();
 			return;
 		}
@@ -203,6 +217,7 @@ export class WorkMemory {
 
 	private async poll(): Promise<void> {
 		this.running = true;
+		const beforeCount = this.entries.length;
 		try {
 			const existing = new Set(this.entries.map((e) => e.fragment_id));
 			// ── 通道⓪：链扩散（先查链，深度=1：只追加直接出边邻居，不递归）──
@@ -236,6 +251,9 @@ export class WorkMemory {
 			console.error("[work_memory] 轮询失败：", (err as Error)?.message ?? err);
 		} finally {
 			this.running = false;
+			// 收敛守卫：本轮零新增 → 计数 +1；有新增 → 清零
+			const added = this.entries.length - beforeCount;
+			this.noGrowthRounds = added > 0 ? 0 : this.noGrowthRounds + 1;
 			this.schedule();
 		}
 	}

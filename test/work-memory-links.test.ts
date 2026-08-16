@@ -660,5 +660,21 @@ describe("work_memory 联想链 · 阶段二（headless 异步建链）", () => 
 			const file = JSON.parse(fs.readFileSync(LINKS_PATH, "utf8"));
 			assert.ok(file.source_fingerprint.startsWith("sha256:"), "服务端补齐内容指纹");
 		});
+
+		test("收敛守卫：连续 2 轮零新增 → 触发建链（小库填不满预算兜底）", async () => {
+			// 小库/窄主题：关键词通道永远返回空，primary 只有 frag_X，
+			// appendedChars 远低于 10240 → 若不加收敛守卫会 300ms 死循环。
+			const fake = fakeSpawn("{}", 0);
+			workMemory.setSearchImpl(async () => ({ results: [] }) as unknown as SearchResults);
+			workMemory.refresh("q", results(["2026-01-01/frag_X"]));
+			(workMemory as unknown as { stop(): void }).stop();
+			await forcePoll(); // 轮 1：零新增 → noGrowthRounds=1，未收敛
+			assert.equal(fake.calls, 0, "第 1 轮零新增不应立即触发建链");
+			(workMemory as unknown as { stop(): void }).stop();
+			await forcePoll(); // 轮 2：零新增 → noGrowthRounds=2 → schedule 触发建链
+			assert.equal(fake.calls, 1, "连续 2 轮零新增应触发一次建链");
+			await new Promise((r) => setTimeout(r, 20));
+			assert.ok(fs.existsSync(LINKS_PATH), "链文件应已落盘");
+		});
 	});
 });
