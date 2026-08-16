@@ -96,6 +96,8 @@ dsh plugin --profile web add @bingo_touth/memory-mcp-server
 
 > 为什么不能全自动：DSH 以 `shell:false` 启动 MCP 子进程，Windows 上 `npx`/`.cmd` 直启不可用（实测 ENOENT/EINVAL），必须 `node + 绝对路径`，而绝对路径只有你本机知道——所以保留这一行替换。
 >
+> ⚠️ 覆盖行必须是上面的普通 `- id:` 形式，**不要**再用 `- insert:` 包同一个 id——bundle 已插入该行，再 insert 会产生重复条目，DSH 启动直接报错 `duplicate loader entry id: mcp-memory`（实测踩坑）。卸载插件后这一行会因找不到条目而自动跳过（告警无害）。
+>
 > 卸载：`dsh plugin --profile web remove @bingo_touth/memory-mcp-server`。
 
 ### Claude Code：项目根的 `.mcp.json`
