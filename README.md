@@ -46,7 +46,7 @@ memory-mcp                                      # 直接以 stdio 启动
 # 或临时运行：npx @bingo_touth/memory-mcp-server
 ```
 
-> 发布者注意：npm 裸名 `memory-mcp-server` / `memory-mcp` 均已被占用，发布前必须把 `package.json` 的 `name` 改为 scoped 名（`@<你的npm用户名>/memory-mcp-server`）并 `npm login` 后 `npm publish --access public`。
+> 本包发布名：**`@bingo_touth/memory-mcp-server`**（npm 裸名 `memory-mcp-server` / `memory-mcp` 均已被他人占用，故用 scoped 名）。
 
 ## 各 harness 接入片段（参数化）
 
