@@ -1,8 +1,19 @@
 {
   "name": "memory-mcp-server",
   "version": "0.9.1",
-  "private": true,
+  "private": false,
   "type": "module",
+  "description": "分层长期记忆 MCP 服务器：本地 MiniLM 或 OpenAI 兼容嵌入 API，供 LLM Agent（DeepSeek Harness / Claude Code）做可语义检索的长期记忆",
+  "bin": {
+    "memory-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "scripts/"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "node scripts/inject-version.mjs && tsx src/index.ts",
     "watch": "tsx src/watcher/cli.ts",
@@ -11,7 +22,8 @@
     "build": "node scripts/inject-version.mjs && tsc",
     "start": "node dist/index.js",
     "multiview:eval": "node bench/run-multiview-eval.mjs",
-    "test": "node --import tsx --test test/**/*.test.ts"
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "prepublishOnly": "node scripts/inject-version.mjs && tsc"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",

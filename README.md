@@ -38,22 +38,54 @@ npm run build      # tsc → dist/
 
 要求 Node ≥ 20(开发用 22 验证)。
 
-## 在 Claude Code 里注册
+### 从 npm 安装（发布后）
 
-项目根的 `.mcp.json`:
+```bash
+npm install -g @<你的scope>/memory-mcp-server     # 全局安装（包名以实际发布为准）
+memory-mcp                                        # 直接以 stdio 启动
+# 或临时运行：npx @<你的scope>/memory-mcp-server
+```
+
+> 发布者注意：npm 裸名 `memory-mcp-server` / `memory-mcp` 均已被占用，发布前必须把 `package.json` 的 `name` 改为 scoped 名（`@<你的npm用户名>/memory-mcp-server`）并 `npm login` 后 `npm publish --access public`。
+
+## 各 harness 接入片段（参数化）
+
+**数据根约定（最重要）**：记忆库存储在**服务器进程 CWD** 下的 `memory/` 目录。以你想让记忆归属的项目根作为 `cwd` 启动——下面两个配置的 `cwd` 字段都是关键。
+
+### DeepSeek Harness（DSH）：`~/.dsh/profiles/<profile>/cordis.patch.yml`
+
+```yaml
+- id: mcp-memory
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: memory
+    transport: stdio
+    command: node
+    args:
+      - '<安装路径>/dist/index.js'   # 或全局安装后：["npx", "memory-mcp"]
+    cwd: '<项目根>'                  # 记忆库落在这里的 memory/ 下
+    toolCallTimeoutMs: 120000
+    failOnStartupError: true
+```
+
+### Claude Code：项目根的 `.mcp.json`
 
 ```json
 {
   "mcpServers": {
     "memory": {
+      "type": "stdio",
       "command": "node",
-      "args": ["/绝对路径/memory-mcp-server/dist/index.js"]
+      "args": ["<安装路径>/dist/index.js"],
+      "env": {}
     }
   }
 }
 ```
 
-或直接给Claude Code文件已安装的路径，让其智能注册，然后重启Claude Code。
+或直接给 Claude Code 文件已安装的路径，让其智能注册，然后重启 Claude Code。
+
+> **发布友好开关**：服务器启动时会向 CWD 项目的 harness 规则文件（AGENTS.md 等）注入「记忆使用规范」。对他人机器这是侵入性行为——设 `MEMORY_SKIP_INJECT=1`（或 `true`/`yes`）可跳过；本机不设则保留现状。
 
 ---
 

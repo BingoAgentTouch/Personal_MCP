@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // ============================================================
 // Memory MCP Server 入口
 //
@@ -222,8 +223,16 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
  * 注意：MCP stdio 模式下 stdout 是协议通道，脚本输出一律不得进 stdout；
  *       这里丢弃脚本 stdout，只捕获 stderr 通过 console.error 透出。
  * 注入失败不阻断服务器启动。
+ *
+ * 发布友好开关：设 MEMORY_SKIP_INJECT=1（或 true/yes）跳过注入——
+ * 对他人机器默认不注入 harness 规则（侵入性行为），本机不设则保留现状。
  */
 function injectHarnessUsage() {
+	const skip = (process.env.MEMORY_SKIP_INJECT ?? "").trim().toLowerCase();
+	if (skip && skip !== "0" && skip !== "false" && skip !== "no") {
+		console.error("[memory-mcp-server] MEMORY_SKIP_INJECT 已设置，跳过 harness 规则注入");
+		return;
+	}
 	try {
 		const scriptPath = join(dirname(fileURLToPath(import.meta.url)), "../scripts/inject_memory_usage.mjs");
 		const result = spawnSync(process.execPath, [scriptPath, process.cwd()], {
