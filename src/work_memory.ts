@@ -5,8 +5,9 @@
  *  - LLM 每次 memory_search 触发 refresh()：把最新命中的条目作为「主体」（primary）
  *    替换进热文件，保留之前后台轮询追加的条目（appended）。
  *  - 后台定时轮询（动态间隔：appended 越满轮询越慢，3s → 15min 平方曲线）：
- *    从「当前线索」（最近 query + 已注入条目的 topic_name）提取关键词，
- *    复用现有语义检索（retriever.search）发现新的相关记忆，追加摘要 + 路径。
+ *    通道⓪ 先查联想链（work_memory_links.json，深度=1 直接出边邻居），
+ *    再走通道①关键词语义检索（最近 query + 已注入条目的 topic_name），
+ *    两条通道共同发现新的相关记忆，追加摘要 + 路径。
  *  - 预算：默认 4% × 128K ≈ 5120 tokens（按 ~2 字符/token 折算为字符数）为
  *    **appended（主体外条目）的预算**——「主体外的条目加起来满 4%」即停；
  *    主体（primary）是 LLM 主动检索的结果，不占预热预算。
@@ -19,8 +20,15 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { SearchResultItem, SearchResults } from "./types.js";
+import type { FragmentMeta, SearchResultItem, SearchResults } from "./types.js";
 import { search } from "./search/retriever.js";
+import { getFragment } from "./storage/fragments.js";
+import {
+	buildLinksAsync,
+	computeFingerprint,
+	loadLinks,
+	readLinkFile,
+} from "./work_memory_links.js";
 
 const WORK_MEMORY_PATH = path.resolve("memory/work_memory.md");
 
@@ -106,6 +114,18 @@ export class WorkMemory {
 		};
 	}
 
+	/** 从 FragmentMeta 构造 WorkMemoryEntry（链扩散通道⓪用；FragmentMeta 无 matched_snippet，兜底只取 result_desc） */
+	private entryFromFragment(frag: FragmentMeta, kind: EntryKind): WorkMemoryEntry {
+		return {
+			fragment_id: frag.fragment_id,
+			title: frag.task_desc || frag.fragment_id,
+			summary: frag.result_desc || "",
+			topic: frag.topic_name || null,
+			kind,
+			addedAt: Date.now(),
+		};
+	}
+
 	private recomputeKeywords(): void {
 		const topics = new Set<string>();
 		for (const e of this.entries) {
@@ -122,7 +142,11 @@ export class WorkMemory {
 
 	private schedule(): void {
 		if (this.timer) return; // 已有待触发 timer（poll 末尾的 schedule 会被 refresh 的 timer 挡住）
-		if (this.appendedChars() >= APPENDED_BUDGET) return; // appended 满预算：停轮询，直到下次 search
+		if (this.appendedChars() >= APPENDED_BUDGET) {
+			// appended 满预算：停轮询，直到下次 search；此时触发异步建链（阶段二）
+			this.maybeTriggerLinkBuild();
+			return;
+		}
 		this.timer = setTimeout(() => {
 			this.timer = null;
 			void this.poll();
@@ -134,10 +158,66 @@ export class WorkMemory {
 		this.timer.unref();
 	}
 
+	/**
+	 * 存满时异步触发 headless 建链（阶段二）。不 await——fire-and-forget 语义，
+	 * buildLinksAsync 内部收集 stdout + 校验 + 落盘，失败只留日志。
+	 * 防重：① 进程内进行中标志；② 内容指纹与链文件一致则跳过（§7.2）。
+	 */
+	private linkBuildInFlight = false;
+
+	private maybeTriggerLinkBuild(): void {
+		if (this.linkBuildInFlight) return; // 建链进行中，不重复触发
+		const ids = this.entries.map((e) => e.fragment_id);
+		const fingerprint = computeFingerprint(ids);
+		const existing = readLinkFile();
+		if (existing && existing.source_fingerprint === fingerprint) return; // 链已覆盖当前内容
+		if (ids.length === 0) return; // 无条目，无链可建
+		this.linkBuildInFlight = true;
+		void buildLinksAsync({
+			entries: this.entries.map((e) => ({
+				fragment_id: e.fragment_id,
+				title: e.title,
+				summary: e.summary,
+				topic: e.topic,
+			})),
+			fingerprint,
+			cwd: process.cwd(),
+			workMemoryPath: WORK_MEMORY_PATH,
+		})
+			.then((result) => {
+				console.log(
+					"[work_memory] 建链结果：",
+					result.ok
+						? `ok (${result.linksCount} 条出边条目)`
+						: `失败：${result.error ?? "unknown"}`,
+				);
+			})
+			.catch((err) => {
+				console.error("[work_memory] 建链异常：", (err as Error)?.message ?? err);
+			})
+			.finally(() => {
+				this.linkBuildInFlight = false;
+			});
+	}
+
 	private async poll(): Promise<void> {
 		this.running = true;
 		try {
 			const existing = new Set(this.entries.map((e) => e.fragment_id));
+			// ── 通道⓪：链扩散（先查链，深度=1：只追加直接出边邻居，不递归）──
+			// 快照遍历：循环内 push 的邻居不会被本通道再次遍历（天然深度=1）
+			for (const e of [...this.entries]) {
+				if (this.appendedChars() >= APPENDED_BUDGET) break;
+				for (const nid of loadLinks(e.fragment_id)) {
+					if (this.appendedChars() >= APPENDED_BUDGET) break;
+					if (existing.has(nid)) continue;          // 去重复用现有 Set
+					const frag = getFragment(nid);
+					if (!frag) continue;                     // 存在性校验：快照可能指向已删 fragment
+					this.entries.push(this.entryFromFragment(frag, "appended"));
+					existing.add(nid);
+				}
+			}
+			// ── 通道①：关键词语义检索（现有，不动）──
 			for (const kw of this.keywords) {
 				if (this.appendedChars() >= APPENDED_BUDGET) break;
 				const results = await this.searchImpl(kw, POLL_TOP_K);
