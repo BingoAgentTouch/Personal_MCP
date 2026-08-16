@@ -4,6 +4,10 @@
 # 安装：dsh plugin --profile <profile名> add @bingo_touth/memory-mcp-server
 #   或源码安装：dsh plugin --profile <profile名> add github:BingoAgentTouch/Personal_MCP
 #
+# 注意：bundle patch 是「补丁语义」（applyEntryPatches over 空根），新增行必须用
+#   `- insert:` 包裹；用户在自己 cordis.patch.yml 里用同 id（mcp-memory）覆盖时
+#   则写普通 `- id: mcp-memory` 行即可（行已被本补丁插入，按 id 覆盖生效）。
+#
 # ⚠ 唯一需要替换的一处：args 里的 '<安装路径>/dist/index.js'
 #   （Windows 下 SDK 以 shell:false 启动，npx/.cmd 直启不可用，必须 node + 绝对路径）
 #   推荐做法：npm i -g @bingo_touth/memory-mcp-server 后，在你自己的
@@ -15,15 +19,16 @@
 #   env.MEMORY_SKIP_INJECT=1：对他人机器默认不注入 harness 规则（侵入性行为）
 #   failOnStartupError=false：路径未替换时 DSH 照常启动，只告警不阻断
 # ============================================================
-- id: mcp-memory
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: memory
-    transport: stdio
-    command: node
-    args:
-      - '<安装路径>/dist/index.js'
-    env:
-      MEMORY_SKIP_INJECT: '1'
-    toolCallTimeoutMs: 120000
-    failOnStartupError: false
+- insert:
+    - id: mcp-memory
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: memory
+        transport: stdio
+        command: node
+        args:
+          - '<安装路径>/dist/index.js'
+        env:
+          MEMORY_SKIP_INJECT: '1'
+        toolCallTimeoutMs: 120000
+        failOnStartupError: false
