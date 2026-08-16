@@ -74,6 +74,17 @@ function writeFragmentLong(id: string, resultLen = 400): void {
 	fs.writeFileSync(path.join(dir, `${fragId}.md`), md, "utf8");
 }
 
+/** 构造长摘要 SearchResultItem（budgetReached 测试用） */
+function itemLong(id: string, resultLen = 600): SearchResultItem {
+	const longSummary = "长摘要内容".repeat(Math.ceil(resultLen / 6)).slice(0, resultLen);
+	return {
+		fragment_id: id,
+		task_desc: `任务 ${id}`,
+		result_desc: longSummary,
+		hierarchy: { topic_name: "测试主题" },
+	} as unknown as SearchResultItem;
+}
+
 /** 写链文件（覆盖） */
 function writeLinks(links: Record<string, string[]>): void {
 	fs.mkdirSync(path.dirname(LINKS_PATH), { recursive: true });
@@ -485,6 +496,34 @@ describe("work_memory 联想链 · 阶段二（headless 异步建链）", () => 
 			// 未等 close（进行中标志仍 true），再触发 → 不重复 spawn
 			triggerBuild();
 			assert.equal(fake.calls, 1, "进行中不应重复触发");
+		});
+
+		test("追加触顶 → schedule 触发建链（budgetReached 信号，§7.1 修复）", async () => {
+			// 修复背景：trimToBudget 裁剪条件（> 预算）与 schedule 停轮询条件（>= 预算）
+			// 之间存在缝隙——追加超线 → trim 裁回线内 → appendedChars 永远 < 预算 →
+			// 「存满」几乎不可达。以「追加后曾触顶」budgetReached 信号代替。
+			const fake = fakeSpawn("{}", 0);
+			// 25 条长摘要（每条 ~600 字符渲染）→ 追加过程必然越过 10240 预算线
+			const neighbors: string[] = [];
+			for (let i = 0; i < 25; i++) {
+				const nid = `2026-01-01/frag_N${String(i).padStart(2, "0")}`;
+				neighbors.push(nid);
+				writeFragmentLong(nid);
+			}
+			workMemory.setSearchImpl(async () =>
+				({ results: neighbors.map((id) => itemLong(id, 600)) }) as unknown as SearchResults,
+			);
+			workMemory.refresh("q", results(["2026-01-01/frag_X"]));
+			// 清 timer 模拟真实 timer 触发后的状态，再手动 poll（poll 末尾 schedule 会检查 budgetReached）
+			(workMemory as unknown as { stop(): void }).stop();
+			await forcePoll();
+			// poll 追加触顶 → budgetReached=true → schedule → maybeTriggerLinkBuild → spawn
+			assert.equal(fake.calls, 1, "触顶应触发一次建链");
+			// 等待微任务落盘完成
+			await new Promise((r) => setTimeout(r, 20));
+			assert.ok(fs.existsSync(LINKS_PATH), "链文件应已落盘");
+			const file = JSON.parse(fs.readFileSync(LINKS_PATH, "utf8"));
+			assert.ok(file.source_fingerprint.startsWith("sha256:"), "服务端补齐内容指纹");
 		});
 	});
 });

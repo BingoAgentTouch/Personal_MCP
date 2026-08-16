@@ -140,10 +140,16 @@ export class WorkMemory {
 		return Math.round(MIN_INTERVAL_MS + (MAX_INTERVAL_MS - MIN_INTERVAL_MS) * fill * fill);
 	}
 
+	/** appended 是否曾触达预算线（追加后检测）。trimToBudget 的裁剪条件（> 预算）
+	 *  与 schedule 停轮询条件（>= 预算）之间存在缝隙：追加 → 超线 → trim 裁回线内
+	 *  → 永远 < 预算 → 「存满」几乎不可达。故以「曾触顶」作为存满信号。 */
+	private budgetReached = false;
+
 	private schedule(): void {
 		if (this.timer) return; // 已有待触发 timer（poll 末尾的 schedule 会被 refresh 的 timer 挡住）
-		if (this.appendedChars() >= APPENDED_BUDGET) {
-			// appended 满预算：停轮询，直到下次 search；此时触发异步建链（阶段二）
+		if (this.appendedChars() >= APPENDED_BUDGET || this.budgetReached) {
+			// appended 满预算（或曾触顶）：停轮询，直到下次 search；此时触发异步建链（阶段二）
+			this.budgetReached = false;
 			this.maybeTriggerLinkBuild();
 			return;
 		}
@@ -215,6 +221,7 @@ export class WorkMemory {
 					if (!frag) continue;                     // 存在性校验：快照可能指向已删 fragment
 					this.entries.push(this.entryFromFragment(frag, "appended"));
 					existing.add(nid);
+					if (this.appendedChars() >= APPENDED_BUDGET) this.budgetReached = true;
 				}
 			}
 			// ── 通道①：关键词语义检索（现有，不动）──
@@ -226,6 +233,7 @@ export class WorkMemory {
 					if (existing.has(r.fragment_id)) continue;
 					this.entries.push(this.toEntry(r, "appended"));
 					existing.add(r.fragment_id);
+					if (this.appendedChars() >= APPENDED_BUDGET) this.budgetReached = true;
 				}
 			}
 			this.render();
