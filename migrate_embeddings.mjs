@@ -91,7 +91,7 @@ function verifyManifest(manifest) {
 	if (stored !== hash(canonicalJson(payload))) throw new Error(`manifest hash mismatch: ${manifest.generation_id}`);
 }
 function manifestIdentityMatches(manifest, tokenizer) {
-	return manifest.embedding_model_id === provider.MODEL_ID &&
+	return manifest.embedding_model_id === provider.embeddingModelId() &&
 		manifest.tokenizer_id === tokenizer.tokenizer_id &&
 		manifest.model_max_length === tokenizer.model_max_length &&
 		manifest.special_token_reserve === tokenizer.special_token_reserve &&
@@ -149,9 +149,10 @@ if (command === "build") {
 	if (representationKind === "multiview" && !policyPath) throw new Error("--evidence-policy is required for multiview build");
 	const tokenizer = await builder.getTokenizerManifest();
 	const validatedPolicy = representationKind === "multiview"
-		? evidencePolicy.readValidatedEvidencePolicy(path.resolve(policyPath), evidencePolicy.currentEvidencePolicyScope(provider.MODEL_ID, tokenizer.tokenizer_id))
+		? evidencePolicy.readValidatedEvidencePolicy(path.resolve(policyPath), evidencePolicy.currentEvidencePolicyScope(provider.embeddingModelId(), tokenizer.tokenizer_id))
 		: null;
-	await generation.createGeneration(generationId, result.hash, 384, representationKind, validatedPolicy);
+	const dimension = await provider.getEmbeddingDimension();
+	await generation.createGeneration(generationId, result.hash, dimension, representationKind, validatedPolicy);
 	const buildManifest = generation.setGenerationExpectedCount(generationId, result.rows.length);
 	let ok = 0;
 	const failures = [];

@@ -11,7 +11,7 @@ import type {
 	EmbeddingViewDisclosure,
 } from "../types.js";
 import type { EffectiveMultiviewView } from "./delta.js";
-import { MODEL_ID } from "./provider.js";
+import { embeddingModelId, embeddingNormalize, embeddingPooling, embeddingQuantized, embeddingRuntimeIdentity, getEmbeddingDimension } from "./provider.js";
 import {
 	MULTIVIEW_AGGREGATION_MODE,
 	MULTIVIEW_DOCUMENT_RECIPE_ID,
@@ -349,15 +349,16 @@ export async function createGeneration(
 export async function createGeneration(
 	generationId: string,
 	sourceInventoryHash: string,
-	dimension = 384,
+	dimension?: number,
 	representationKind: "single" | "multiview" = "single",
 	evidencePolicy: EvidenceGatePolicySnapshot | null = null,
 ): Promise<EmbeddingGenerationManifest> {
 	if (readGenerationManifest(generationId)) throw new Error(`generation already exists: ${generationId}`);
+	const resolvedDimension = dimension ?? await getEmbeddingDimension();
 	const tokenizer = await getTokenizerManifest();
 	const isMultiview = representationKind === "multiview";
 	if (isMultiview) {
-		assertValidatedEvidencePolicy(evidencePolicy, currentEvidencePolicyScope(MODEL_ID, tokenizer.tokenizer_id));
+		assertValidatedEvidencePolicy(evidencePolicy, currentEvidencePolicyScope(embeddingModelId(), tokenizer.tokenizer_id));
 	}
 	const manifest: EmbeddingGenerationManifest = {
 		manifest_schema_version: 2,
@@ -375,15 +376,15 @@ export async function createGeneration(
 		document_recipe_version: isMultiview ? MULTIVIEW_DOCUMENT_RECIPE_VERSION : DOCUMENT_RECIPE_VERSION,
 		query_recipe_id: QUERY_RECIPE_ID,
 		query_recipe_version: QUERY_RECIPE_VERSION,
-		embedding_model_id: MODEL_ID,
+		embedding_model_id: embeddingModelId(),
 		embedding_model_revision: null,
 		tokenizer_id: tokenizer.tokenizer_id,
 		tokenizer_revision: tokenizer.tokenizer_revision,
-		runtime_identity: "@xenova/transformers@2.17.2;node",
-		pooling: "mean",
-		normalize: true,
-		quantized: true,
-		dimension,
+		runtime_identity: embeddingRuntimeIdentity(),
+		pooling: embeddingPooling(),
+		normalize: embeddingNormalize(),
+		quantized: embeddingQuantized(),
+		dimension: resolvedDimension,
 		model_max_length: tokenizer.model_max_length,
 		special_token_reserve: tokenizer.special_token_reserve,
 		source_schema_version: 1,

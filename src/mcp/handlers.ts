@@ -47,7 +47,7 @@ import { search } from "../search/retriever.js";
 import { logSearch, logGetFragment } from "../storage/signals.js";
 import { workMemory } from "../work_memory.js";
 import { buildDocumentInput, buildDocumentViews, sourceContentHash } from "../embedding/builder.js";
-import { encodeStrict, isFallbackMode } from "../embedding/provider.js";
+import { encodeStrict, embeddingModeLabel } from "../embedding/provider.js";
 import { getActiveGeneration } from "../embedding/generation.js";
 import {
 	assertDeltaWritable,
@@ -139,7 +139,7 @@ export async function handleCreateFragment(input: CreateFragmentInput) {
 							result_desc: meta.result_desc,
 							turns_length: meta.turns_text.length,
 							embedding_dim: embeddingDim,
-							embedding_mode: isFallbackMode() ? "fallback" : "transformers",
+							embedding_mode: embeddingModeLabel(),
 							embedding_status: "ready",
 							embedding_layer: "delta",
 							embedding_generation: active.generation_id,

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { AutoTokenizer, env } from "@xenova/transformers";
-import { MODEL_ID } from "./provider.js";
+import { MODEL_ID, apiMaxTokens, embeddingBackend, embeddingModelId, embeddingTokenizerId } from "./provider.js";
 
 export const DOCUMENT_RECIPE_ID = "fragment-structured-budgeted";
 export const DOCUMENT_RECIPE_VERSION = 1;
@@ -125,6 +125,38 @@ interface TokenCounter {
 
 let tokenizerPromise: Promise<TokenizerLike> | null = null;
 
+/** 字符近似 token 计数（API 模式，不依赖本地 tokenizer）：CJK 字符按 1 token，其余按 4 字符 1 token。 */
+export function approximateTokenCount(text: string): number {
+	if (!text) return 0;
+	const points = Array.from(text);
+	let cjk = 0;
+	for (const ch of points) {
+		const code = ch.codePointAt(0)!;
+		if (
+			(code >= 0x3000 && code <= 0x303f) || // CJK 标点
+			(code >= 0x3400 && code <= 0x4dbf) || // CJK 扩展 A
+			(code >= 0x4e00 && code <= 0x9fff) || // CJK 统一表意
+			(code >= 0xf900 && code <= 0xfaff) || // CJK 兼容表意
+			(code >= 0xff00 && code <= 0xffef) // 全角形式
+		) {
+			cjk++;
+		}
+	}
+	const rest = points.length - cjk;
+	return cjk + Math.ceil(rest / 4);
+}
+
+/** API 模式下的合成 tokenizer：不依赖 @xenova/transformers，仅用于预算截断。 */
+function charApproxTokenizer(): TokenizerLike {
+	const maxLength = apiMaxTokens();
+	const tokenizer = ((text: string): { input_ids: { data: ArrayLike<number> } } => {
+		return { input_ids: { data: new Array<number>(approximateTokenCount(text)).fill(0) } };
+	}) as TokenizerLike;
+	tokenizer.model_max_length = maxLength;
+	tokenizer._encode_text = (text: string): unknown[] => new Array<number>(approximateTokenCount(text)).fill(0);
+	return tokenizer;
+}
+
 function normalize(value: string): string {
 	if (typeof value !== "string") throw new Error("embedding builder requires string fields");
 	return value.normalize("NFC").replace(/\r\n?/g, "\n").trim();
@@ -142,6 +174,7 @@ export function sourceContentHash(input: DocumentInput): string {
 async function getTokenizer(): Promise<TokenizerLike> {
 	if (!tokenizerPromise) {
 		tokenizerPromise = (async () => {
+			if (embeddingBackend() === "api") return charApproxTokenizer();
 			env.allowLocalModels = true;
 			env.allowRemoteModels = false;
 			return (await AutoTokenizer.from_pretrained(MODEL_ID, { local_files_only: true })) as unknown as TokenizerLike;
@@ -198,11 +231,11 @@ function validateMultiViewManifest(manifest: RepresentationManifestLike | undefi
 	if (manifest.document_policy_version !== MULTIVIEW_POLICY_VERSION) {
 		throw new Error(`multiview builder requires policy version ${MULTIVIEW_POLICY_VERSION}`);
 	}
-	if (manifest.embedding_model_id !== undefined && manifest.embedding_model_id !== MODEL_ID) {
-		throw new Error(`multiview builder requires model ${MODEL_ID}`);
+	if (manifest.embedding_model_id !== undefined && manifest.embedding_model_id !== embeddingModelId()) {
+		throw new Error(`multiview builder requires model ${embeddingModelId()}`);
 	}
-	if (manifest.tokenizer_id !== undefined && manifest.tokenizer_id !== MODEL_ID) {
-		throw new Error(`multiview builder requires tokenizer ${MODEL_ID}`);
+	if (manifest.tokenizer_id !== undefined && manifest.tokenizer_id !== embeddingTokenizerId()) {
+		throw new Error(`multiview builder requires tokenizer ${embeddingTokenizerId()}`);
 	}
 	if (manifest.tokenizer_revision !== undefined && manifest.tokenizer_revision !== TOKENIZER_REVISION) {
 		throw new Error(`multiview builder tokenizer revision mismatch`);
@@ -562,5 +595,5 @@ export async function getTokenizerManifest(): Promise<{
 	const counter = createTokenCounter(tokenizer);
 	const max = tokenizer.model_max_length ?? 512;
 	const special = counter.count("", true);
-	return { tokenizer_id: MODEL_ID, tokenizer_revision: TOKENIZER_REVISION, model_max_length: max, special_token_reserve: special };
+	return { tokenizer_id: embeddingTokenizerId(), tokenizer_revision: TOKENIZER_REVISION, model_max_length: max, special_token_reserve: special };
 }
