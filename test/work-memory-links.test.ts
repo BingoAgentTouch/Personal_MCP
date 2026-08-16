@@ -22,6 +22,9 @@ const {
 	buildLinksAsync,
 	setSpawnImpl,
 	resetSpawnImpl,
+	resolveDshBin,
+	setResolveDshBinImpl,
+	resetResolveDshBinImpl,
 } = await import("../src/work_memory_links.js");
 
 // ---------- 测试辅助 ----------
@@ -112,6 +115,22 @@ function countOccurrences(text: string, id: string): number {
 	return (text.match(re) ?? []).length;
 }
 
+/**
+ * 无副作用假 spawn：立即 close(0)、空输出。用于「通道⓪ 链扩散」这类只关心扩散、
+ * 不关心建链的测试——它们触发预算触顶时 mayTriggerLinkBuild 会走到 buildLinksAsync，
+ * 若用真实 spawn 会真去跑 headless DSH（慢/挂），故注入空实现吞掉。
+ */
+function noopSpawn(): void {
+	setSpawnImpl(() => ({
+		stdout: { on() { return { on() {} }; } },
+		stderr: { on() { return { on() {} }; } },
+		on(event: string, cb: (code: number | null) => void) {
+			if (event === "close") queueMicrotask(() => cb(0));
+			return { on() {} };
+		},
+	}));
+}
+
 // ---------- 测试 ----------
 
 describe("work_memory 联想链（work_memory_links）", () => {
@@ -119,9 +138,12 @@ describe("work_memory 联想链（work_memory_links）", () => {
 		workMemory.init();
 		// 清空链文件，各测试自建
 		fs.rmSync(LINKS_PATH, { force: true });
+		// 通道⓪ 测试会触发预算触顶→建链副作用，注入空 spawn 吞掉（避免真跑 headless）
+		noopSpawn();
 	});
 
 	after(() => {
+		resetSpawnImpl();
 		workMemory.init(); // 清掉 poll 定时器，避免测试进程挂住
 	});
 
@@ -317,6 +339,7 @@ describe("work_memory 联想链 · 阶段二（headless 异步建链）", () => 
 
 	after(() => {
 		resetSpawnImpl();
+		resetResolveDshBinImpl();
 		workMemory.init();
 	});
 
@@ -369,6 +392,13 @@ describe("work_memory 联想链 · 阶段二（headless 异步建链）", () => 
 
 		test("非对象输入 → null", () => {
 			assert.equal(normalizeLinks("not object", validIds), null);
+		});
+
+		test("flash 误输出 [{fragment_id}] 对象数组 → 抽成字符串", () => {
+			assert.deepEqual(
+				normalizeLinks({ A: [{ fragment_id: "B" }, { fragment_id: "C" }] }, validIds),
+				{ A: ["B", "C"] },
+			);
 		});
 	});
 
@@ -430,7 +460,8 @@ describe("work_memory 联想链 · 阶段二（headless 异步建链）", () => 
 			);
 		});
 
-		test("任务文本包含锁定版本参数与条目内嵌", async () => {
+		test("bin 定位成功 → node 直跑 bin.js（无 npx、无 .cmd）", async () => {
+			setResolveDshBinImpl(() => "/fake/dsh/bin.js");
 			const fake = fakeSpawn("{}", 0);
 			await buildLinksAsync({
 				entries: SAMPLE_ENTRIES,
@@ -439,18 +470,122 @@ describe("work_memory 联想链 · 阶段二（headless 异步建链）", () => 
 				workMemoryPath: path.join(tmpRoot, "memory", "work_memory.md"),
 			});
 			const cap = fake.captured!;
-			// npx 锁版本（Windows npx.cmd；测试环境 win32）
-			if (process.env.MEMORY_DSH_BIN) {
-				assert.equal(cap.command, process.execPath);
-				assert.equal(cap.args[0], process.env.MEMORY_DSH_BIN);
-			} else {
-				assert.match(cap.command, /npx/);
-				assert.match(cap.args.join(" "), /@deepseek-ai\/dsh@0\.1\.0-rc\.6/);
-			}
+			assert.equal(cap.command, process.execPath); // node 直跑，规避 npx.cmd 的 EINVAL
+			assert.equal(cap.args[0], "/fake/dsh/bin.js");
 			assert.equal(cap.args[1], "--profile");
 			assert.equal(cap.args[2], "headless");
+			assert.equal(cap.args[3], "--patch"); // 覆盖默认模型的 patch overlay
 			assert.equal(cap.options.cwd, tmpRoot);
-			assert.match(cap.args[3], /2026-01-01\/frag_A/); // 任务文本内嵌条目
+			assert.match(cap.args[5], /2026-01-01\/frag_A/); // 任务文本内嵌条目
+		});
+
+		test("bin 定位失败 → 回退 npx 锁版本", async () => {
+			setResolveDshBinImpl(() => null);
+			const fake = fakeSpawn("{}", 0);
+			await buildLinksAsync({
+				entries: SAMPLE_ENTRIES,
+				fingerprint: "sha256:fp",
+				cwd: tmpRoot,
+				workMemoryPath: path.join(tmpRoot, "memory", "work_memory.md"),
+			});
+			const cap = fake.captured!;
+			assert.match(cap.command, /npx/);
+			assert.match(cap.args.join(" "), /@deepseek-ai\/dsh@0\.1\.0-rc\.6/);
+			assert.equal(cap.args[1], "--profile");
+			assert.equal(cap.args[2], "headless");
+			assert.equal(cap.args[3], "--patch");
+			assert.equal(cap.options.cwd, tmpRoot);
+			assert.match(cap.args[5], /2026-01-01\/frag_A/); // 任务文本内嵌条目
+		});
+
+		test("建链用更快模型：--patch overlay 覆盖为 flash + off，跑完清理临时文件", async () => {
+			setResolveDshBinImpl(() => "/fake/dsh/bin.js");
+			const fake = fakeSpawn("{}", 0);
+			const p = buildLinksAsync({
+				entries: SAMPLE_ENTRIES,
+				fingerprint: "sha256:fp",
+				cwd: tmpRoot,
+				workMemoryPath: path.join(tmpRoot, "memory", "work_memory.md"),
+			});
+			// 同步读取：close 微任务尚未执行，临时 patch/settings 仍在
+			const cap = fake.captured!;
+			assert.equal(cap.args[3], "--patch");
+			const patchFile = cap.args[4];
+			const patchContent = fs.readFileSync(patchFile, "utf8");
+			assert.match(patchContent, /- id: settings/);
+			const m = patchContent.match(/path: "([^"]+)"/);
+			assert.ok(m, "patch 应含 settings 路径");
+			const settingsContent = fs.readFileSync(m![1], "utf8");
+			assert.match(settingsContent, /provider: deepseek-official/);
+			assert.match(settingsContent, /model: deepseek-v4-flash/);
+			assert.match(settingsContent, /reasoningEffort: off/);
+			await p;
+			assert.ok(!fs.existsSync(patchFile), "临时 patch 应被清理");
+		});
+	});
+
+	describe("resolveDshBin（§8.2 DSH 二进制定位）", () => {
+		function withEnv(patch: Record<string, string | undefined>, fn: () => void): void {
+			const saved: Record<string, string | undefined> = {};
+			for (const [k, v] of Object.entries(patch)) {
+				saved[k] = process.env[k];
+				if (v === undefined) delete process.env[k];
+				else process.env[k] = v;
+			}
+			try {
+				fn();
+			} finally {
+				for (const [k, v] of Object.entries(saved)) {
+					if (v === undefined) delete process.env[k];
+					else process.env[k] = v;
+				}
+			}
+		}
+
+		test("MEMORY_DSH_BIN 存在 → 优先返回", () => {
+			const bin = path.join(tmpRoot, "dsh-bin.js");
+			fs.writeFileSync(bin, "// stub", "utf8");
+			withEnv({ MEMORY_DSH_BIN: bin }, () => {
+				assert.equal(resolveDshBin(), bin);
+			});
+		});
+
+		test("扫描 npm 缓存命中 DSH_VERSION → 返回 bin.js", () => {
+			const cache = path.join(tmpRoot, "fake-cache");
+			const bin = path.join(
+				cache,
+				"_npx",
+				"deadbeef",
+				"node_modules",
+				"@deepseek-ai",
+				"dsh",
+				"lib",
+				"bin.js",
+			);
+			fs.mkdirSync(path.dirname(bin), { recursive: true });
+			fs.writeFileSync(bin, "// stub", "utf8");
+			fs.writeFileSync(
+				path.join(path.dirname(path.dirname(bin)), "package.json"),
+				JSON.stringify({ version: "0.1.0-rc.6" }),
+				"utf8",
+			);
+			withEnv({ MEMORY_DSH_BIN: undefined, NPM_CONFIG_CACHE: cache }, () => {
+				assert.equal(resolveDshBin(), bin);
+			});
+		});
+
+		test("无 env、无缓存 → null", () => {
+			withEnv(
+				{
+					MEMORY_DSH_BIN: undefined,
+					NPM_CONFIG_CACHE: path.join(tmpRoot, "no-such-cache"),
+					LOCALAPPDATA: path.join(tmpRoot, "no-such-local"),
+					USERPROFILE: path.join(tmpRoot, "no-such-home"),
+				},
+				() => {
+					assert.equal(resolveDshBin(), null);
+				},
+			);
 		});
 	});
 

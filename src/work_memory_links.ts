@@ -15,6 +15,7 @@
 //   元数据（version/built_at/source_fingerprint）由服务端填充，不信任 LLM。
 // ============================================================
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -31,6 +32,15 @@ export const LINKS_PATH = path.resolve("memory/work_memory_links.json");
 
 /** headless 调用版本锁（P0-2；升级需重跑 §8.4 前置验证） */
 export const DSH_VERSION = "0.1.0-rc.6";
+
+/**
+ * 建链用模型（阶段二 headless）：默认用更快、不思考的 deepseek-v4-flash + off，
+ * 因为建链只需两两「强相关」判断，不需要深度推理；pro+high 会拖慢 O(N²) 比较。
+ * 可用环境变量覆盖（与 MEMORY_DSH_BIN 同风格）。
+ */
+export const BUILD_PROVIDER = process.env.MEMORY_BUILD_PROVIDER ?? "deepseek-official";
+export const BUILD_MODEL = process.env.MEMORY_BUILD_MODEL ?? "deepseek-v4-flash";
+export const BUILD_REASONING_EFFORT = process.env.MEMORY_BUILD_REASONING_EFFORT ?? "off";
 
 // ------------------------------------------------------------
 // 读（通道⓪）
@@ -117,11 +127,27 @@ export function normalizeLinks(raw: unknown, validIds: Set<string>): Record<stri
 	for (const [k, v] of Object.entries(raw)) {
 		if (!validIds.has(k)) continue;
 		if (!Array.isArray(v)) continue;
-		const vals = v.filter((x): x is string => typeof x === "string" && validIds.has(x) && x !== k);
+		// 宽容：值既可能是 fragment_id 字符串数组（规范），也可能是 LLM 误输出的
+		// [{fragment_id: "..."}] 对象数组（flash 常见），统一抽成字符串。
+		const vals: string[] = [];
+		for (const x of v) {
+			const id = toFragmentId(x);
+			if (id !== null && validIds.has(id) && id !== k) vals.push(id);
+		}
 		if (vals.length === 0) continue;
 		out[k] = vals.slice(0, 2);
 	}
 	return out;
+}
+
+/** 把 LLM 输出的一条「指向」抽成 fragment_id 字符串：字符串直取，对象取 .fragment_id，其余 null。 */
+function toFragmentId(x: unknown): string | null {
+	if (typeof x === "string") return x;
+	if (typeof x === "object" && x !== null) {
+		const fid = (x as { fragment_id?: unknown }).fragment_id;
+		if (typeof fid === "string") return fid;
+	}
+	return null;
 }
 
 /** 服务端落盘：补元数据（version/built_at/source_fingerprint），原子写（tmp+rename） */
@@ -174,6 +200,98 @@ export function resetSpawnImpl(): void {
 	spawnImpl = spawn as unknown as HeadlessSpawnFn;
 }
 
+// ------------------------------------------------------------
+// DSH 二进制定位（阶段二 headless 复用本地 DSH）
+// ------------------------------------------------------------
+
+/**
+ * 定位 DSH 的 bin.js（headless 建链要复用本地 DSH，避免 npx 联网安装 + Node 22
+ * 对 .cmd spawn 的 EINVAL 限制）：
+ * ① MEMORY_DSH_BIN 环境变量显式指定（优先）；
+ * ② 扫描 npm 缓存 `_npx/<hash>/node_modules/@deepseek-ai/dsh/lib/bin.js`，
+ *    优先取版本 === DSH_VERSION 的，否则取任意一个；
+ * 都找不到 → null（调用方回退 npx 锁版本）。
+ */
+export function resolveDshBin(): string | null {
+	const env = process.env.MEMORY_DSH_BIN;
+	if (env && fs.existsSync(env)) return env;
+	const localAppData = process.env.LOCALAPPDATA;
+	const home = process.env.USERPROFILE;
+	const cache =
+		process.env.NPM_CONFIG_CACHE ||
+		path.join(localAppData || path.join(home || "", "AppData", "Local"), "npm-cache");
+	const npxDir = path.join(cache, "_npx");
+	let fallback: string | null = null;
+	try {
+		if (!fs.existsSync(npxDir)) return null;
+		for (const dir of fs.readdirSync(npxDir)) {
+			const base = path.join(npxDir, dir, "node_modules", "@deepseek-ai", "dsh");
+			const bin = path.join(base, "lib", "bin.js");
+			if (!fs.existsSync(bin)) continue;
+			try {
+				const pkg = JSON.parse(fs.readFileSync(path.join(base, "package.json"), "utf8")) as {
+					version?: string;
+				};
+				if (pkg.version === DSH_VERSION) return bin;
+			} catch {
+				/* ignore 单个缓存目录的 package.json 损坏 */
+			}
+			if (!fallback) fallback = bin;
+		}
+	} catch {
+		/* ignore 缓存目录读取失败 */
+	}
+	return fallback;
+}
+
+/** 解析器可注入（测试替换为固定值） */
+let resolveDshBinImpl: () => string | null = resolveDshBin;
+
+/** 注入假解析器（测试用） */
+export function setResolveDshBinImpl(fn: () => string | null): void {
+	resolveDshBinImpl = fn;
+}
+
+/** 恢复默认解析器 */
+export function resetResolveDshBinImpl(): void {
+	resolveDshBinImpl = resolveDshBin;
+}
+
+/**
+ * 写临时 settings + patch overlay，让 headless 建链用更快模型（默认 flash + off），
+ * 不受用户 settings.yaml 里 `agent-default-model`（默认 pro + high）的覆盖。
+ * 返回 `patchArg`（传给 --patch 的绝对路径，正斜杠）与 `cleanup`（删除临时目录）。
+ */
+function writeBuildSettingsOverlay(): { patchArg: string; cleanup: () => void } {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-build-"));
+	const settingsFile = path.join(dir, "settings.yaml");
+	const patchFile = path.join(dir, "patch.yaml");
+	fs.writeFileSync(
+		settingsFile,
+		[
+			"agent-default-model:",
+			`  provider: ${BUILD_PROVIDER}`,
+			`  model: ${BUILD_MODEL}`,
+			`  reasoningEffort: ${BUILD_REASONING_EFFORT}`,
+			"",
+		].join("\n"),
+		"utf8",
+	);
+	const settingsArg = settingsFile.replace(/\\/g, "/");
+	fs.writeFileSync(patchFile, `- id: settings\n  config:\n    path: "${settingsArg}"\n`, "utf8");
+	const patchArg = patchFile.replace(/\\/g, "/");
+	return {
+		patchArg,
+		cleanup: () => {
+			try {
+				fs.rmSync(dir, { recursive: true, force: true });
+			} catch {
+				/* ignore 临时文件清理失败 */
+			}
+		},
+	};
+}
+
 /** 构造建链任务文本（内嵌条目列表，绝对路径供 headless 参考） */
 export function buildLinkTask(entries: LinkBuildEntry[], workMemoryPath: string): string {
 	const items = entries.map((e) => ({
@@ -188,7 +306,8 @@ export function buildLinkTask(entries: LinkBuildEntry[], workMemoryPath: string)
 		"\n\n任务：判断这些条目两两之间的相关性，只保留【强相关】的关系" +
 		"（语义先后/因果/互补/同机制演进等）。弱相关、纯时间相邻、纯同主题但无实际关联的一律不连。" +
 		"每条条目最多指向 2 条最相关的（有向，A→B 不要求 B→A）；若强相关超过 2 条，按相关性降序取前 2，宁可少连也不要弱边凑数。" +
-		"只输出一个 JSON 对象（键=源条目 fragment_id，值=其指向的 fragment_id 数组）到 stdout。" +
+		"只输出一个 JSON 对象到 stdout：键=源条目 fragment_id 字符串，值=其指向的 fragment_id 字符串数组（数组里直接放字符串，不要放对象）。" +
+		"格式示例：{\"2026-08-05/frag_007\": [\"2026-08-05/frag_008\", \"2026-08-08/frag_003\"]}。" +
 		"不要任何其他文字、不要 markdown 代码块、不要解释。没有强相关关系的条目不要出现在 JSON 里。"
 	);
 }
@@ -206,15 +325,18 @@ export async function buildLinksAsync(input: {
 }): Promise<LinkBuildResult> {
 	const task = buildLinkTask(input.entries, input.workMemoryPath);
 
-	// 本机可用 MEMORY_DSH_BIN 指向本地 bin.js（避免 npx 联网）；默认 npx 锁版本
-	const bin = process.env.MEMORY_DSH_BIN;
+	// 定位本地 DSH bin.js（env 指定或 npm 缓存自动发现）；找到则 node 直跑，
+	// 避开 npx 联网 + Node 22 对 .cmd spawn 的 EINVAL；找不到回退 npx 锁版本。
+	const bin = resolveDshBinImpl();
 	const command = bin ? process.execPath : process.platform === "win32" ? "npx.cmd" : "npx";
+	// 用临时 settings + patch overlay 让 headless 走更快模型（默认 flash + off）
+	const overlay = writeBuildSettingsOverlay();
 	const args = bin
-		? [bin, "--profile", "headless", task]
-		: ["@deepseek-ai/dsh@" + DSH_VERSION, "--profile", "headless", task];
+		? [bin, "--profile", "headless", "--patch", overlay.patchArg, task]
+		: ["@deepseek-ai/dsh@" + DSH_VERSION, "--profile", "headless", "--patch", overlay.patchArg, task];
 
 	const startedAt = Date.now();
-	console.log("[work_memory_links] 建链启动：" + JSON.stringify({ pid: "n/a", command, startedAt, entries: input.entries.length }));
+	console.log("[work_memory_links] 建链启动：" + JSON.stringify({ pid: "n/a", command, model: BUILD_MODEL, reasoningEffort: BUILD_REASONING_EFFORT, startedAt, entries: input.entries.length }));
 
 	return new Promise<LinkBuildResult>((resolve) => {
 		let stdout = "";
@@ -223,6 +345,7 @@ export async function buildLinksAsync(input: {
 		try {
 			child = spawnImpl(command, args, { cwd: input.cwd });
 		} catch (err) {
+			overlay.cleanup();
 			console.error("[work_memory_links] 建链 spawn 失败：", (err as Error)?.message ?? err);
 			resolve({ ok: false, error: "spawn failed: " + ((err as Error)?.message ?? err) });
 			return;
@@ -230,6 +353,7 @@ export async function buildLinksAsync(input: {
 		child.stdout.on("data", (d) => (stdout += d.toString()));
 		child.stderr.on("data", (d) => (stderr += d.toString()));
 		child.on("close", (code) => {
+			overlay.cleanup();
 			console.log("[work_memory_links] 建链结束：" + JSON.stringify({ code, stdoutChars: stdout.length, elapsedMs: Date.now() - startedAt }));
 			if (code !== 0) {
 				console.error("[work_memory_links] 建链失败（exit " + code + "）：" + stderr.slice(0, 500));

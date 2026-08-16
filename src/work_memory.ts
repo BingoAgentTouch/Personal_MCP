@@ -73,6 +73,8 @@ export class WorkMemory {
 		this.entries = [];
 		this.query = "";
 		this.keywords = [];
+		this.budgetReached = false;
+		this.linkBuildInFlight = false;
 		this.render();
 	}
 
