@@ -5,7 +5,7 @@
   "type": "module",
   "description": "分层长期记忆 MCP 服务器：本地 MiniLM 或 OpenAI 兼容嵌入 API，供 LLM Agent（DeepSeek Harness / Claude Code）做可语义检索的长期记忆",
   "bin": {
-    "memory-mcp": "./dist/index.js"
+    "memory-mcp": "dist/index.js"
   },
   "files": [
     "dist/",
