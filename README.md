@@ -68,6 +68,34 @@ memory-mcp                                      # 直接以 stdio 启动
     failOnStartupError: true
 ```
 
+### 作为 DSH 插件安装（推荐，0.9.2+）
+
+本包自带 DSH bundle 声明（`dsh.bundle.patch`），可省去手写整段接入配置：
+
+```bash
+npm i -g pnpm                        # dsh plugin 依赖 pnpm（一次性）
+dsh plugin --profile web add @bingo_touth/memory-mcp-server
+```
+
+安装后 bundle 已注册 `mcp-memory` 行（默认 `MEMORY_SKIP_INJECT=1`、`cwd`=DSH 启动目录、`failOnStartupError=false` 不阻断启动）。**唯一要做的**：把服务器绝对路径换成你的——在你自己的 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里用同 id 覆盖（用户层覆盖 bundle 层）：
+
+```yaml
+- id: mcp-memory
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: memory
+    transport: stdio
+    command: node
+    args: ['C:/<你的绝对路径>/dist/index.js']   # npm i -g 后可用 `npm root -g` 查
+    cwd: '<你的项目根>'                          # 记忆库落在这里的 memory/ 下
+    toolCallTimeoutMs: 120000
+    failOnStartupError: true
+```
+
+> 为什么不能全自动：DSH 以 `shell:false` 启动 MCP 子进程，Windows 上 `npx`/`.cmd` 直启不可用（实测 ENOENT/EINVAL），必须 `node + 绝对路径`，而绝对路径只有你本机知道——所以保留这一行替换。
+>
+> 卸载：`dsh plugin --profile web remove @bingo_touth/memory-mcp-server`。
+
 ### Claude Code：项目根的 `.mcp.json`
 
 ```json

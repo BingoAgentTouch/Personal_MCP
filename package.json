@@ -1,6 +1,6 @@
 {
   "name": "@bingo_touth/memory-mcp-server",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": false,
   "type": "module",
   "description": "分层长期记忆 MCP 服务器：本地 MiniLM 或 OpenAI 兼容嵌入 API，供 LLM Agent（DeepSeek Harness / Claude Code）做可语义检索的长期记忆",
@@ -9,8 +9,14 @@
   },
   "files": [
     "dist/",
-    "scripts/"
+    "scripts/",
+    "cordis.patch.yml"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    }
+  },
   "engines": {
     "node": ">=20"
   },

@@ -1,0 +1,29 @@
+# ============================================================
+# memory-mcp-server — DSH 插件 bundle 补丁（cordis.patch.yml）
+#
+# 安装：dsh plugin --profile <profile名> add @bingo_touth/memory-mcp-server
+#   或源码安装：dsh plugin --profile <profile名> add github:BingoAgentTouch/Personal_MCP
+#
+# ⚠ 唯一需要替换的一处：args 里的 '<安装路径>/dist/index.js'
+#   （Windows 下 SDK 以 shell:false 启动，npx/.cmd 直启不可用，必须 node + 绝对路径）
+#   推荐做法：npm i -g @bingo_touth/memory-mcp-server 后，在你自己的
+#   ~/.dsh/profiles/<profile名>/cordis.patch.yml 里用同 id（mcp-memory）覆盖本行，
+#   把你的绝对路径和 cwd（记忆库落盘的项目根）填进去——用户层覆盖 bundle 层。
+#
+# 默认值说明：
+#   cwd 缺省 = DSH 进程启动目录（记忆库落在该目录的 memory/ 下，见 README 数据根约定）
+#   env.MEMORY_SKIP_INJECT=1：对他人机器默认不注入 harness 规则（侵入性行为）
+#   failOnStartupError=false：路径未替换时 DSH 照常启动，只告警不阻断
+# ============================================================
+- id: mcp-memory
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: memory
+    transport: stdio
+    command: node
+    args:
+      - '<安装路径>/dist/index.js'
+    env:
+      MEMORY_SKIP_INJECT: '1'
+    toolCallTimeoutMs: 120000
+    failOnStartupError: false
