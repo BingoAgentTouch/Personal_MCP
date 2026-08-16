@@ -77,6 +77,8 @@ npm i -g pnpm                        # dsh plugin 依赖 pnpm（一次性）
 dsh plugin --profile web add @bingo_touth/memory-mcp-server
 ```
 
+> **pnpm 10 提示 `ERR_PNPM_IGNORED_BUILDS`（Ignored build scripts: protobufjs, sharp）时**：这是 pnpm 10 默认拦截依赖构建脚本，会让 `dsh plugin add` 以非零退出、登记不生效。文本嵌入用不到这两个构建产物——编辑 `~/.dsh/profiles/web/pnpm-workspace.yaml`（pnpm 已自动写好占位符），把 `protobufjs` / `sharp` 的 `allowBuilds` 置为 `false`，然后**重跑一次** `dsh plugin add` 即可。
+
 安装后 bundle 已注册 `mcp-memory` 行（默认 `MEMORY_SKIP_INJECT=1`、`cwd`=DSH 启动目录、`failOnStartupError=false` 不阻断启动）。**唯一要做的**：把服务器绝对路径换成你的——在你自己的 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里用同 id 覆盖（用户层覆盖 bundle 层）：
 
 ```yaml
