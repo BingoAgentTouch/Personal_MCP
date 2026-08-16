@@ -2,9 +2,11 @@
 
 一个给 LLM Agent(如 Claude Code)用的**分层长期记忆 MCP 服务器**。把对话沉淀成可语义检索的三层记忆,回答"我们上次聊到哪了"时能带出完整上下文。
 
-- **本地优先**:embedding 用本地 `@xenova/transformers`(多语言 MiniLM,384 维),不依赖任何云 API。
+> 当前版本:**0.9.1**
+
+- **本地优先,可选 API**:默认用本地 `@xenova/transformers`(多语言 MiniLM,384 维,零云依赖);也可切换到 **OpenAI 兼容嵌入 API**(`MEMORY_EMBED_PROVIDER=api`,免下载本地模型,见下文)。
 - **分层回溯**:命中片段(L1)时自动回填当天总结(L2)和主题脉络(L3)。
-- **优雅降级**:模型加载失败时退回关键词(Jaccard)检索,并在 stderr **明确告警**——不会假装正常。
+- **优雅降级**:本地模型加载失败或 API 不可用时退回关键词(Jaccard)检索,并在 stderr **明确告警**——不会假装正常。
 
 ---
 
@@ -95,11 +97,37 @@ console.log("OK dim=", r.data.length);   // 期望 384
 
 ### 怎么判断当前跑在哪种模式
 
-看服务器 **stderr**:
+看服务器 **stderr** 与 `create_fragment` 返回的 `embedding_mode` 字段(取值为 `api` / `transformers` / `fallback`):
 
-- 看到 `[embedding] ⚠ 运行在降级模式` → 模型没加载,在用关键词检索,按上面步骤修。
-- 看不到该行,`memory_search` 返回分数普遍在 **0.2+**(且同义改写也能命中)→ 语义模式正常。
-- 若还在降级模式,`create_fragment` 的返回里 `embedding_mode` 会是 `"fallback"`。
+- `embedding_mode: "api"` → 走 OpenAI 兼容嵌入 API。
+- `embedding_mode: "transformers"` → 本地 MiniLM 语义模式正常。
+- `embedding_mode: "fallback"` → 模型没加载 / API 不可用,在用关键词检索,按上面步骤修。
+- `memory_search` 返回分数普遍在 **0.2+**(且同义改写也能命中)→ 语义模式正常。
+
+---
+
+## 嵌入模型 API 后端(可选,免下载本地模型)
+
+不想下载/运行本地 384 维模型时,设 `MEMORY_EMBED_PROVIDER=api` 即可切到 OpenAI 兼容的 `/v1/embeddings`(覆盖 OpenAI、智谱、通义、月之暗面、Ollama、PPInfra 等):
+
+```bash
+MEMORY_EMBED_PROVIDER=api
+MEMORY_EMBED_API_URL=https://api.openai.com/v1   # 必填,含 /v1 的 base URL
+MEMORY_EMBED_API_KEY=sk-xxxx                     # 必填
+MEMORY_EMBED_API_MODEL=text-embedding-3-small    # 可选,默认这个
+MEMORY_EMBED_API_MAX_TOKENS=8191                 # 可选,文档预算上限
+MEMORY_EMBED_API_DIM=1536                        # 可选,固定维度;缺省则首次编码自动探测
+MEMORY_EMBED_API_MAX_RETRIES=4                   # 可选,429/5xx/网络异常的退避重试次数
+MEMORY_EMBED_API_RETRY_BASE_MS=2000              # 可选,重试退避基数(指数增长,上限 60s)
+MEMORY_EMBED_API_DELAY_MS=0                      # 可选,相邻请求最小间隔;严格限流档(如 5/min)设 12000+
+```
+
+要点:
+
+- **API 模式不做本地分词**:文档预算截断用字符近似计数(`tokenizer_id = char-approx-v1`),不下载任何模型文件。
+- **API 模型与本地 MiniLM 的向量不可混用**:切换模型后 `representation_identity_hash` 变化,必须 `migrate_embeddings.mjs build/validate/switch` 重建;建议用 `--representation single`(multiview 证据门阈值是按 MiniLM 384 校准的,不随 API 迁移)。
+- **失败语义分层**:检索路径(编码失败)快速回退关键词,不等待重试;构建/迁移路径严格失败,绝不出半成品向量。429/5xx/网络异常自动指数退避重试(优先 `Retry-After` 头)。
+- **免费档限流**:如 PPInfra 免费档 5 请求/分钟,建库必须配 `MEMORY_EMBED_API_DELAY_MS=12000+`(76 片段 ≈ 16 分钟)。
 
 ---
 

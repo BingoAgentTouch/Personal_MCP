@@ -11,6 +11,9 @@ const ENV_KEYS = [
 	"MEMORY_EMBED_API_MODEL",
 	"MEMORY_EMBED_API_MAX_TOKENS",
 	"MEMORY_EMBED_API_DIM",
+	"MEMORY_EMBED_API_MAX_RETRIES",
+	"MEMORY_EMBED_API_RETRY_BASE_MS",
+	"MEMORY_EMBED_API_DELAY_MS",
 ] as const;
 
 const savedEnv: Record<string, string | undefined> = {};
@@ -37,8 +40,11 @@ function setApiEnv(overrides: Record<string, string> = {}): void {
 	process.env.MEMORY_EMBED_API_URL = overrides.MEMORY_EMBED_API_URL ?? "https://example.com/v1";
 	process.env.MEMORY_EMBED_API_KEY = overrides.MEMORY_EMBED_API_KEY ?? "sk-test";
 	process.env.MEMORY_EMBED_API_MODEL = overrides.MEMORY_EMBED_API_MODEL ?? "test-embed-model";
-	if (overrides.MEMORY_EMBED_API_MAX_TOKENS !== undefined) process.env.MEMORY_EMBED_API_MAX_TOKENS = overrides.MEMORY_EMBED_API_MAX_TOKENS;
-	if (overrides.MEMORY_EMBED_API_DIM !== undefined) process.env.MEMORY_EMBED_API_DIM = overrides.MEMORY_EMBED_API_DIM;
+	for (const key of ENV_KEYS) {
+		if (key === "MEMORY_EMBED_PROVIDER" || key === "MEMORY_EMBED_API_URL" || key === "MEMORY_EMBED_API_KEY" || key === "MEMORY_EMBED_API_MODEL") continue;
+		if (overrides[key] !== undefined) process.env[key] = overrides[key];
+		else delete process.env[key];
+	}
 }
 
 function mockEmbeddingFetch(vector: number[], status = 200, body = ""): void {
@@ -152,8 +158,8 @@ describe("API 编码", () => {
 		assert.equal(dimension, 7);
 	});
 
-	test("API 调用失败时 encode 回退空向量、encodeStrict 抛错", async () => {
-		setApiEnv();
+	test("API 调用失败时 encode 快速回退空向量、encodeStrict 重试后抛错", async () => {
+		setApiEnv({ MEMORY_EMBED_API_MAX_RETRIES: "1", MEMORY_EMBED_API_RETRY_BASE_MS: "5" });
 		provider.resetEmbeddingEngineForTests();
 		globalThis.fetch = (async () => {
 			throw new Error("network down");
@@ -182,5 +188,58 @@ describe("API 未配置", () => {
 		assert.equal(provider.isFallbackMode(), true);
 		assert.equal(provider.embeddingModeLabel(), "fallback");
 		await assert.rejects(() => provider.encodeStrict("严格"));
+	});
+});
+
+describe("API 限流重试与节流", () => {
+	test("429 后按退避重试成功", async () => {
+		setApiEnv({ MEMORY_EMBED_API_MAX_RETRIES: "3", MEMORY_EMBED_API_RETRY_BASE_MS: "5" });
+		provider.resetEmbeddingEngineForTests();
+		let calls = 0;
+		globalThis.fetch = (async () => {
+			calls += 1;
+			if (calls === 1) {
+				return new Response(JSON.stringify({ code: 429, message: "rate limited" }), { status: 429, headers: { "Content-Type": "application/json" } });
+			}
+			return new Response(JSON.stringify({ data: [{ embedding: [1, 2, 3] }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+		}) as unknown as typeof fetch;
+		const vector = await provider.encodeStrict("限流后重试");
+		assert.deepEqual(vector, [1, 2, 3]);
+		assert.equal(calls, 2);
+	});
+
+	test("持续 429 在重试次数耗尽后抛错", async () => {
+		setApiEnv({ MEMORY_EMBED_API_MAX_RETRIES: "2", MEMORY_EMBED_API_RETRY_BASE_MS: "5" });
+		provider.resetEmbeddingEngineForTests();
+		let calls = 0;
+		globalThis.fetch = (async () => {
+			calls += 1;
+			return new Response(JSON.stringify({ code: 429, message: "rate limited" }), { status: 429, headers: { "Content-Type": "application/json" } });
+		}) as unknown as typeof fetch;
+		await assert.rejects(() => provider.encodeStrict("持续限流"), /429/);
+		assert.equal(calls, 3); // 1 次原始 + 2 次重试
+	});
+
+	test("4xx 非 429（如 400）不重试直接抛错", async () => {
+		setApiEnv({ MEMORY_EMBED_API_MAX_RETRIES: "2", MEMORY_EMBED_API_RETRY_BASE_MS: "5" });
+		provider.resetEmbeddingEngineForTests();
+		let calls = 0;
+		globalThis.fetch = (async () => {
+			calls += 1;
+			return new Response("bad request", { status: 400, headers: { "Content-Type": "text/plain" } });
+		}) as unknown as typeof fetch;
+		await assert.rejects(() => provider.encodeStrict("参数错误"), /400/);
+		assert.equal(calls, 1);
+	});
+
+	test("MEMORY_EMBED_API_DELAY_MS 节流相邻请求", async () => {
+		setApiEnv({ MEMORY_EMBED_API_DELAY_MS: "200" });
+		provider.resetEmbeddingEngineForTests();
+		mockEmbeddingFetch([1, 2, 3]);
+		const start = Date.now();
+		await provider.encodeStrict("第一次");
+		await provider.encodeStrict("第二次");
+		const elapsed = Date.now() - start;
+		assert.ok(elapsed >= 190, `两次请求应被间隔 ≥200ms，实际 ${elapsed}ms`);
 	});
 });

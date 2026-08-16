@@ -19,6 +19,9 @@
 //   MEMORY_EMBED_API_MODEL       可选，默认 text-embedding-3-small
 //   MEMORY_EMBED_API_MAX_TOKENS  可选，默认 8191，用于文档预算截断
 //   MEMORY_EMBED_API_DIM         可选，固定维度；缺省则首次编码时自动探测
+//   MEMORY_EMBED_API_MAX_RETRIES     可选，默认 4，429/5xx/网络异常的退避重试次数
+//   MEMORY_EMBED_API_RETRY_BASE_MS   可选，默认 2000，重试退避基数（指数增长，上限 60s）
+//   MEMORY_EMBED_API_DELAY_MS        可选，默认 0，相邻请求的最小间隔（严格限流档如 5/min 设 12000+）
 // ============================================================
 
 /** 本地 embedding 模型 ID，可用环境变量 MEMORY_EMBED_MODEL 覆盖 */
@@ -33,6 +36,13 @@ function parsePositiveInt(value: string | undefined, fallback: number | null): n
 	if (!value) return fallback;
 	const parsed = Number.parseInt(value, 10);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** 允许 0 的非负整数解析（限流/退避配置用；0 = 关闭） */
+function parseNonNegativeInt(value: string | undefined, fallback: number): number {
+	if (value === undefined || value === "") return fallback;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 interface ApiConfig {
@@ -93,7 +103,8 @@ export function apiMaxTokens(): number {
 	return apiConfig().maxTokens;
 }
 
-let rawEncodeFn: EncodeFn | null = null;
+let rawEncodeFn: EncodeFn | null = null; // 严格路径（encodeStrict）：完整退避重试
+let lenientEncodeFn: EncodeFn | null = null; // 宽容路径（encode）：快速失败，不重试
 let fallbackActive = false;
 let initPromise: Promise<void> | null = null;
 let probedApiDimension: number | null = null;
@@ -120,40 +131,90 @@ async function tryLoadTransformers(): Promise<EncodeFn | null> {
 	}
 }
 
-/** OpenAI 兼容 /v1/embeddings 编码（失败抛错，由上层决定降级或直接失败） */
-async function apiEncode(text: string): Promise<number[]> {
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 429/5xx 重试退避等待：优先 Retry-After 头，否则指数退避（上限 60s）+ 少量抖动 */
+function retryWaitMs(retryAfter: string | null, attempt: number): number {
+	if (retryAfter) {
+		const seconds = Number.parseInt(retryAfter, 10);
+		if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+	}
+	const base = parseNonNegativeInt(process.env.MEMORY_EMBED_API_RETRY_BASE_MS, 2000);
+	const wait = Math.min(base * 2 ** attempt, 60000);
+	return wait + Math.floor(Math.random() * Math.min(500, wait));
+}
+
+/** 相邻请求最小间隔（严格限流档位用；0 = 不节流） */
+let lastApiRequestAt = 0;
+async function paceRequest(): Promise<void> {
+	const delay = parseNonNegativeInt(process.env.MEMORY_EMBED_API_DELAY_MS, 0);
+	if (delay <= 0) return;
+	const elapsed = Date.now() - lastApiRequestAt;
+	if (elapsed < delay) await sleep(delay - elapsed);
+	lastApiRequestAt = Date.now();
+}
+
+/** OpenAI 兼容 /v1/embeddings 编码（失败抛错，由上层决定降级或直接失败；429/5xx/网络异常按 retries 退避重试） */
+async function apiEncode(text: string, retries: number): Promise<number[]> {
 	const config = apiConfig();
 	if (!config.baseUrl || !config.apiKey) {
 		throw new Error("embedding API 未配置：请设置 MEMORY_EMBED_API_URL 与 MEMORY_EMBED_API_KEY");
 	}
 	const trimmed = config.baseUrl.replace(/\/+$/, "");
 	const endpoint = trimmed.endsWith("/embeddings") ? trimmed : `${trimmed}/embeddings`;
-	const response = await fetch(endpoint, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-		},
-		body: JSON.stringify({ model: config.model, input: text }),
-	});
-	if (!response.ok) {
-		const body = await response.text().catch(() => "");
-		throw new Error(`embedding API 请求失败 ${response.status}: ${body.slice(0, 300)}`);
+	let lastError: Error | null = null;
+	for (let attempt = 0; attempt <= retries; attempt++) {
+		await paceRequest();
+		let response: Response;
+		try {
+			response = await fetch(endpoint, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+				},
+				body: JSON.stringify({ model: config.model, input: text }),
+			});
+		} catch (err) {
+			lastError = new Error(`embedding API 网络异常：${err instanceof Error ? err.message : String(err)}`);
+			if (attempt < retries) {
+				const waitMs = retryWaitMs(null, attempt);
+				console.error(`[embedding] ${lastError.message}，${waitMs}ms 后重试（${attempt + 1}/${retries}）`);
+				await sleep(waitMs);
+				continue;
+			}
+			throw lastError;
+		}
+		const responseBody = await response.text().catch(() => "");
+		if (response.ok) {
+			const payload = JSON.parse(responseBody) as { data?: Array<{ embedding?: number[] }> };
+			const vector = payload.data?.[0]?.embedding;
+			if (!Array.isArray(vector) || vector.length === 0 || vector.some((value) => !Number.isFinite(value))) {
+				throw new Error("embedding API 返回了非法向量");
+			}
+			if (probedApiDimension === null) {
+				probedApiDimension = vector.length;
+			} else if (vector.length !== probedApiDimension) {
+				throw new Error(`embedding API 维度漂移：期望 ${probedApiDimension}，实际 ${vector.length}`);
+			}
+			if (config.dimension !== null && vector.length !== config.dimension) {
+				throw new Error(`embedding API 维度与 MEMORY_EMBED_API_DIM 不符：期望 ${config.dimension}，实际 ${vector.length}`);
+			}
+			return vector;
+		}
+		lastError = new Error(`embedding API 请求失败 ${response.status}: ${responseBody.slice(0, 300)}`);
+		if (response.status !== 429 && response.status < 500) {
+			throw lastError;
+		}
+		if (attempt < retries) {
+			const waitMs = retryWaitMs(response.headers.get("retry-after"), attempt);
+			console.error(`[embedding] ${lastError.message}，${waitMs}ms 后重试（${attempt + 1}/${retries}）`);
+			await sleep(waitMs);
+		}
 	}
-	const payload = (await response.json()) as { data?: Array<{ embedding?: number[] }> };
-	const vector = payload.data?.[0]?.embedding;
-	if (!Array.isArray(vector) || vector.length === 0 || vector.some((value) => !Number.isFinite(value))) {
-		throw new Error("embedding API 返回了非法向量");
-	}
-	if (probedApiDimension === null) {
-		probedApiDimension = vector.length;
-	} else if (vector.length !== probedApiDimension) {
-		throw new Error(`embedding API 维度漂移：期望 ${probedApiDimension}，实际 ${vector.length}`);
-	}
-	if (config.dimension !== null && vector.length !== config.dimension) {
-		throw new Error(`embedding API 维度与 MEMORY_EMBED_API_DIM 不符：期望 ${config.dimension}，实际 ${vector.length}`);
-	}
-	return vector;
+	throw lastError ?? new Error("embedding API 请求失败");
 }
 
 async function ensureInit(): Promise<void> {
@@ -167,12 +228,14 @@ async function ensureInit(): Promise<void> {
 					console.error("[embedding] ⚠ 已选择 API 模式但未配置 MEMORY_EMBED_API_URL / MEMORY_EMBED_API_KEY，运行在关键词 Jaccard 降级模式。");
 					return;
 				}
-				rawEncodeFn = apiEncode;
+				rawEncodeFn = (text) => apiEncode(text, parseNonNegativeInt(process.env.MEMORY_EMBED_API_MAX_RETRIES, 4));
+				lenientEncodeFn = (text) => apiEncode(text, 0);
 				return;
 			}
 			const fn = await tryLoadTransformers();
 			if (fn) {
 				rawEncodeFn = fn;
+				lenientEncodeFn = fn;
 			} else {
 				fallbackActive = true;
 				console.error("[embedding] ⚠ 运行在降级模式：memory_search 使用关键词 Jaccard 而非语义向量，召回质量会明显下降。");
@@ -182,12 +245,13 @@ async function ensureInit(): Promise<void> {
 	await initPromise;
 }
 
-/** 编码文本为向量（宽容：后端不可用或调用失败时返回空向量，检索侧据此回退 Jaccard） */
+/** 编码文本为向量（宽容：后端不可用或调用失败时返回空向量，检索侧据此回退 Jaccard；不重试，快速失败） */
 export async function encode(text: string): Promise<number[]> {
 	await ensureInit();
-	if (!rawEncodeFn) return [];
+	const fn = lenientEncodeFn ?? rawEncodeFn;
+	if (!fn) return [];
 	try {
-		return await rawEncodeFn(text);
+		return await fn(text);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		console.error(`[embedding] 编码失败，本次检索回退关键词模式：${msg}`);
@@ -234,9 +298,11 @@ export async function getEmbeddingDimension(): Promise<number> {
 /** 重置惰性初始化状态（仅测试用） */
 export function resetEmbeddingEngineForTests(): void {
 	rawEncodeFn = null;
+	lenientEncodeFn = null;
 	fallbackActive = false;
 	initPromise = null;
 	probedApiDimension = null;
+	lastApiRequestAt = 0;
 }
 
 /** 余弦相似度 */
