@@ -233,9 +233,12 @@ function weightAndRerank(
 	const weighted = pool.map((s) => {
 		const meta = readMeta(s.id);
 		const weight = decayFloor(effectiveImportance(meta));
-		return { ...s, weight, final: s.rawSimilarity * weight };
+		return { ...s, weight };
 	});
-	weighted.sort((a, b) => b.final - a.final || b.rawSimilarity - a.rawSimilarity || a.id.localeCompare(b.id));
+	// P0（权重不进排序，仅 tie-break）：主排序按原始相似度（相关性），
+	// importance 权重只在相似度相等时作 tie-break，避免「重要性」反转「相关性」
+	// （此前 final = rawSimilarity × weight 会把高相关但低 importance 的正确答案压出 top-k）。
+	weighted.sort((a, b) => b.rawSimilarity - a.rawSimilarity || b.weight - a.weight || a.id.localeCompare(b.id));
 	const results: SearchResultItem[] = [];
 	let hintCount = 0;
 	for (const w of weighted.slice(0, topK)) {
@@ -334,7 +337,7 @@ function buildResultItem(
 	const disclosure = viewDisclosure(query, frag, scored.matchedView);
 	return {
 		fragment_id: frag.fragment_id,
-		score: round4(scored.rawSimilarity * scored.weight),
+		score: round4(scored.rawSimilarity),
 		raw_similarity: round4(scored.rawSimilarity),
 		weight: round4(scored.weight),
 		task_desc: frag.task_desc,

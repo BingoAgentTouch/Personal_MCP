@@ -299,9 +299,9 @@ export interface TopicIndexMeta {
 
 export interface SearchResultItem {
 	fragment_id: string;
-	score: number; // final_score = raw_similarity × weight（重排依据）
-	raw_similarity: number; // 原始 cosine/jaccard 相似度
-	weight: number; // combined_weight（第一期 = decay_floor），调试用
+	score: number; // 相关性分数（P0 后 = raw_similarity；权重不进排序、仅 tie-break，不再乘进 score）
+	raw_similarity: number; // 原始 cosine/jaccard 相似度（与 score 同值，向后兼容保留）
+	weight: number; // combined_weight（第一期 = decay_floor），仅 tie-break 与调试用，不进主排序
 	task_desc: string;
 	result_desc: string;
 	tags: string[];

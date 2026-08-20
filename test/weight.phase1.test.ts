@@ -38,16 +38,14 @@ describe("权重恒为纯衰减（≤ 1.0，实际 ≤ 0.7）", () => {
 	});
 });
 
-describe("相对重排（final = similarity × decay_floor）", () => {
-	test("架构决策(0.55×imp0.95) 反超 闲聊(0.60×imp0.15)", () => {
-		const a = 0.55 * decayFloor(0.95); // 架构决策，中等相关
-		const b = 0.6 * decayFloor(0.15); // 闲聊，较相关
-		assert.ok(a > b, `a=${a} b=${b}`);
-	});
-	test("重要性压不过明显的相似度差距：功能实现(0.75×imp0.70) 仍居首", () => {
-		const c = 0.75 * decayFloor(0.7); // 功能实现，很相关又较重要
-		const a = 0.55 * decayFloor(0.95); // 架构决策，中等相关
-		assert.ok(c > a, `c=${c} a=${a}`);
+describe("P0：权重不进排序（仅 tie-break）", () => {
+	// P0 变更：此前 final = similarity × decay_floor 决定排序，权重会反转相关性
+	// （高相关但低 importance 的正确答案被压出 top-k）。现改为：排序主键 = rawSimilarity，
+	// weight 仅在相似度相等时 tie-break。weightAndRerank 未导出，此处仅确认
+	// decay_floor 仍单调（importance 高 → 权重高），保证 tie-break 语义成立。
+	test("decay_floor 单调：importance 高 → 权重高（tie-break 依据）", () => {
+		assert.ok(decayFloor(0.95) > decayFloor(0.7));
+		assert.ok(decayFloor(0.7) > decayFloor(0.15));
 	});
 });
 
